@@ -1,0 +1,41 @@
+package logic;
+
+public class TrafficLight {
+    public enum Mode { AUTO, MANUAL }
+    public enum LightColor { GREEN, YELLOW, RED }
+    public enum CountdownMode { COUNT_SEC, NON_COUNT_SEC, TEN_COUNT_SEC }
+
+    private Mode mode;
+    private LightColor color;
+    private CountdownMode countdownMode;
+    private int timer; 
+
+    public TrafficLight(Mode mode, LightColor initialColor, CountdownMode countdownMode) {
+        this.mode = mode;
+        this.color = initialColor;
+        this.countdownMode = countdownMode;
+        this.timer = 0;
+    }
+
+    public void switchLight() {
+        if (this.color == LightColor.GREEN) {
+            this.color = LightColor.YELLOW;
+        } else if (this.color == LightColor.YELLOW) {
+            this.color = LightColor.RED;
+        } else if (this.color == LightColor.RED) {
+            this.color = LightColor.GREEN;
+        }
+    }
+
+    public void changeMode(Mode newMode) {
+        this.mode = newMode;
+    }
+
+    public int getRemainingTime() {
+        return this.timer;
+    }
+
+    public LightColor getColor() { return color; }
+    public void setTimer(int timer) { this.timer = timer; }
+    public Mode getMode() { return mode; }
+}

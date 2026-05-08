@@ -1,0 +1,63 @@
+package logic;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Lane {
+    private String direction;
+    private float maxSpeed;
+    private List<Vehicle> vehicles;
+
+
+    private float minX;
+    private float maxX;
+    private float minY;
+    private float maxY;
+
+    public Lane(String direction, float maxSpeed, float minX, float maxX, float minY, float maxY) {
+        this.direction = direction;
+        this.maxSpeed = maxSpeed;
+        this.vehicles = new ArrayList<>();
+        this.minX = minX;
+        this.maxX = maxX;
+        this.minY = minY;
+        this.maxY = maxY;
+    }
+
+    public void addVehicle(Vehicle v) {
+        if (!vehicles.contains(v)) {
+            vehicles.add(v);
+        }
+    }
+
+    public void removeVehicle(Vehicle v) {
+        vehicles.remove(v);
+    }
+
+    public List<Vehicle> getVehicles() {
+        return vehicles;
+    }
+
+    /**
+     * Kiểm tra xem phương tiện có chạm vào lề đường không.
+     * @param vX Tọa độ X của xe
+     * @param vY Tọa độ Y của xe
+     * @param vWidth Chiều rộng xe
+     * @param vHeight Chiều dài xe
+     * @return true nếu xe nằm trong làn, false nếu chạm
+     */
+    public boolean isWithinBoundaries(float vX, float vY, float vWidth, float vHeight) {
+        // Tâm xe ở (vX, vY)
+        float vehicleLeft = vX - (vWidth / 2);
+        float vehicleRight = vX + (vWidth / 2);
+        float vehicleTop = vY - (vHeight / 2);
+        float vehicleBottom = vY + (vHeight / 2);
+
+        if (vehicleLeft <= minX || vehicleRight >= maxX || vehicleTop <= minY || vehicleBottom >= maxY) {
+            return false; 
+        }
+        return true;
+    }
+
+    public float getMaxSpeed() { return maxSpeed; }
+}

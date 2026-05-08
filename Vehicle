@@ -1,0 +1,61 @@
+package logic;
+
+// import logic.DrivingStyle;
+// import logic.SoundManager;
+
+public abstract class Vehicle {
+    protected String id;
+    protected float positionX;
+    protected float positionY;
+    
+    protected float width;
+    protected float height;
+
+    protected float speed;
+    protected float direction; // Góc (Radian)
+
+    protected Object drivingStyle; 
+    protected Object soundManager; 
+
+    public Vehicle(String id, float startX, float startY, float width, float height) {
+        this.id = id;
+        this.positionX = startX;
+        this.positionY = startY;
+        this.width = width;
+        this.height = height;
+        this.speed = 0f;
+        this.direction = 0f; 
+    }
+
+    /**
+     * Logic cập nhật trạng thái
+     * @param currentLane Làn đường xe đang đi
+     */
+    public void updateLogic(Lane currentLane) {
+        // Tính toán vị trí tiếp theo 
+        // direction (radian)
+        float nextPositionX = (float) (positionX + speed * Math.cos(direction));
+        float nextPositionY = (float) (positionY + speed * Math.sin(direction));
+
+        // Kiểm tra va chạm
+        if (currentLane != null && !currentLane.isWithinBoundaries(nextPositionX, nextPositionY, width, height)) {
+            this.speed = 0;
+            // Có thể thêm logic đổi hướng ở đây tùy hành vi của DrivingStyle
+        } else {
+            this.positionX = nextPositionX;
+            this.positionY = nextPositionY;
+        }
+
+        // Logic DrivingStyle
+
+    }
+
+    public void setDrivingStyle(Object style) {
+        this.drivingStyle = style;
+    }
+
+    public float getPositionX() { return positionX; }
+    public float getPositionY() { return positionY; }
+    public float getWidth() { return width; }
+    public float getHeight() { return height; }
+}
