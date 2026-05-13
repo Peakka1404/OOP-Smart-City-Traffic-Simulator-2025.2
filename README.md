@@ -3,6 +3,6 @@
 
 # Chạy 
 Để chạy dự án:
-- Windows: Chạy file 'run.bat'
-- Linux: Chạy file 'run.sh'
-- Trình biên dịch(IDE): Biên dịch(compile) và chạy file 'main.java'
+- Windows: Chạy file `run.bat`
+- Linux: Chạy file `run.sh`
+- Trình biên dịch(IDE): Biên dịch(compile) và chạy file `main.java`
