@@ -4,13 +4,14 @@ import java.util.*;
 import java.util.List;
 
 /**
- * SceneRenderer — Vẽ toàn bộ cảnh.
+ * SceneRenderer — Vẽ toàn cảnh.
  *
- * Road markings (trắng):
- *  • Vạch liền  tại s=0  (trục giữa đường, giữa 2 chiều đối nhau)
- *  • Vạch đứt   tại s=laneWidth (phân làn trong cùng chiều)
- *
- * Traffic lights: 3 bóng đèn (đỏ-vàng-xanh), countdown, cột đèn.
+ * Thay đổi v5:
+ *  • KHÔNG vẽ stop-line trắng trước đèn đỏ — vạch biên ngã tư tự nhiên là stop-line.
+ *  • Đèn giao thông ở BÊN PHẢI hướng đi (s = +hw + offset), ngoài lề đường.
+ *  • Vạch kẻ làn dùng hw/laneCount làm khoảng cách (không dùng laneWidth raw).
+ *  • Vạch liền TẮT tại ranh giới 2 chiều (màu trắng).
+ *  • Vạch đứt trong mỗi chiều (màu trắng).
  */
 public class SceneRenderer {
 
@@ -22,15 +23,14 @@ public class SceneRenderer {
 
     // ── Palette ───────────────────────────────────────────────────────────
     private static final Color C_BG       = new Color(28, 34, 28);
-    private static final Color C_SIDEWALK = new Color(110, 105, 96);
+    private static final Color C_SIDEWALK = new Color(108, 103, 94);
     private static final Color C_ROAD     = new Color(55, 58, 64);
-    private static final Color C_BARRIER  = new Color(240, 240, 240);   // lề ngoài trắng
-    private static final Color C_CENTER   = new Color(245, 245, 245);   // tâm đường trắng liền
-    private static final Color C_LANEDASH = new Color(230, 230, 230, 180); // vạch đứt trắng
-    private static final Color C_NODE_F   = new Color(70, 78, 92);
-    private static final Color C_NODE_R   = new Color(120, 160, 210);
+    private static final Color C_BARRIER  = new Color(235, 235, 235);
+    private static final Color C_CENTER   = new Color(240, 240, 240);     // vạch liền trắng
+    private static final Color C_LANEDASH = new Color(225, 225, 225, 190); // vạch đứt trắng
+    private static final Color C_NODE_F   = new Color(68, 76, 90);
+    private static final Color C_NODE_R   = new Color(115, 155, 205);
 
-    // xe
     private static final Color C_MOVING   = new Color( 52, 152, 219);
     private static final Color C_SLOWING  = new Color(230, 126,  34);
     private static final Color C_STOPPED  = new Color(192,  57,  43);
@@ -45,33 +45,25 @@ public class SceneRenderer {
     public void render(Graphics2D g2, RoadNetwork network) {
         aa(g2);
 
-        // 1. Vỉa hè
         for (Road r : network.getRoads()) drawSidewalk(g2, r);
-
-        // 2. Mặt đường
         for (Road r : network.getRoads()) drawRoadSurface(g2, r);
 
-        // 3. Vạch kẻ đường (trắng: liền tâm, đứt làn)
+        // Vạch kẻ đường (trắng): liền tâm + đứt làn
         drawAllMarkings(g2, network.getRoads());
 
-        // 4. Lề ngoài (barrier trắng)
         for (Road r : network.getRoads()) drawBarriers(g2, r);
 
-        // 5. Vạch dừng (stop lines) tại ngã tư
-        for (IntersectionController ic : network.getAllIntersectionControllers())
-            drawStopLines(g2, ic);
-
-        // 6. Spawn zones
+        // Spawn zones
         for (SpawnZone sz : network.getSpawnZones()) sz.render(g2);
 
-        // 7. Nodes
+        // Nodes
         if (showNodes) for (Node n : network.getNodes()) drawNode(g2, n);
 
-        // 8. Đèn giao thông
+        // Đèn giao thông — KHÔNG vẽ stop-lines, biên ngã tư tự là stop-line
         for (IntersectionController ic : network.getAllIntersectionControllers())
             drawTrafficLights(g2, ic);
 
-        // 9. Xe
+        // Xe
         for (Vehicle v : network.getVehicles()) {
             if (showPath)   drawPath(g2, v);
             if (vehicleMode == VehicleMode.GRAPHIC) drawVehicleGraphic(g2, v);
@@ -81,11 +73,11 @@ public class SceneRenderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Road geometry
+    //  Road
     // ─────────────────────────────────────────────────────────────────────
 
     private void drawSidewalk(Graphics2D g, Road r) {
-        g.setColor(C_SIDEWALK); g.fill(roadPoly(r, r.getHalfWidth()+5));
+        g.setColor(C_SIDEWALK); g.fill(roadPoly(r, r.getHalfWidth() + 6));
     }
 
     private void drawRoadSurface(Graphics2D g, Road r) {
@@ -94,40 +86,45 @@ public class SceneRenderer {
 
     /**
      * Vạch kẻ đường trắng:
-     *  • Vạch LIỀN tại s=0 (ranh giới giữa 2 chiều đường đối nhau).
-     *    Chỉ vẽ khi tồn tại road ngược chiều cùng cặp endpoints.
-     *  • Vạch ĐỨT tại s = k*laneWidth, k=1..laneCount-1 (trong cùng chiều).
+     *  • Vạch LIỀN tại s=0 (ranh giới 2 chiều ngược nhau). Chỉ vẽ 1 lần mỗi cặp.
+     *  • Vạch ĐỨT tại s = k × (hw/laneCount), k=1..laneCount-1 (phân làn trong chiều đó).
      */
     private void drawAllMarkings(Graphics2D g, List<Road> roads) {
-        Set<String> centerDrawn = new HashSet<>();
+        Set<String> centerDone = new HashSet<>();
 
         for (Road r : roads) {
-            double hw = r.getHalfWidth(), lw = r.getLaneWidth();
-            int lc = r.getLaneCount();
+            double hw = r.getHalfWidth();
+            int    lc = r.getLaneCount();
+            double len = r.getLength();
+            double margin = 12;   // không vẽ vào vùng ngã tư
 
-            // ── Vạch liền tâm (giữa 2 chiều) ──────────────────────────────
-            String key  = sortedKey(r.getFrom().getId(), r.getTo().getId());
-            if (!centerDrawn.contains(key)) {
-                boolean hasTwin = roads.stream().anyMatch(t -> t.getFrom()==r.getTo() && t.getTo()==r.getFrom());
+            // ── Vạch liền tâm ──────────────────────────────────────────────
+            String key = sortedKey(r.getFrom().getId(), r.getTo().getId());
+            if (!centerDone.contains(key)) {
+                boolean hasTwin = roads.stream().anyMatch(
+                    t -> t.getFrom()==r.getTo() && t.getTo()==r.getFrom());
                 if (hasTwin) {
                     g.setColor(C_CENTER);
-                    g.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER));
-                    double[] a = r.localToWorld(8, 0), b = r.localToWorld(r.getLength()-8, 0);
+                    g.setStroke(new BasicStroke(2.5f, BasicStroke.CAP_BUTT,
+                            BasicStroke.JOIN_MITER));
+                    double[] a = r.localToWorld(margin, 0);
+                    double[] b = r.localToWorld(len - margin, 0);
                     g.draw(new Line2D.Double(a[0],a[1],b[0],b[1]));
                     g.setStroke(new BasicStroke(1));
-                    centerDrawn.add(key);
+                    centerDone.add(key);
                 }
             }
 
-            // ── Vạch đứt phân làn (trong cùng chiều) ──────────────────────
+            // ── Vạch đứt phân làn ──────────────────────────────────────────
             if (lc < 2) continue;
+            double laneSpacing = hw / lc;   // khoảng cách đều giữa các vạch làn
             g.setColor(C_LANEDASH);
-            g.setStroke(new BasicStroke(1.3f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
-                    1, new float[]{12,10}, 0));
+            g.setStroke(new BasicStroke(1.4f, BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_MITER, 1, new float[]{14, 11}, 0));
             for (int i = 1; i < lc; i++) {
-                double s = i * lw;   // s > 0 = phía phải
-                double[] p1 = r.localToWorld(14, s);
-                double[] p2 = r.localToWorld(r.getLength()-14, s);
+                double s = i * laneSpacing;   // s > 0 = phía phải hướng đi
+                double[] p1 = r.localToWorld(margin, s);
+                double[] p2 = r.localToWorld(len - margin, s);
                 g.draw(new Line2D.Double(p1[0],p1[1],p2[0],p2[1]));
             }
             g.setStroke(new BasicStroke(1));
@@ -143,24 +140,9 @@ public class SceneRenderer {
         double[] a1=r.localToWorld(0,-hw), a2=r.localToWorld(r.getLength(),-hw);
         double[] b1=r.localToWorld(0, hw), b2=r.localToWorld(r.getLength(), hw);
         g.setColor(C_BARRIER);
-        g.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
         g.draw(new Line2D.Double(a1[0],a1[1],a2[0],a2[1]));
         g.draw(new Line2D.Double(b1[0],b1[1],b2[0],b2[1]));
-        g.setStroke(new BasicStroke(1));
-    }
-
-    private void drawStopLines(Graphics2D g, IntersectionController ic) {
-        double hw = ic.getHalfWidth();
-        g.setColor(new Color(240, 240, 240, 200));
-        g.setStroke(new BasicStroke(2.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        for (Map.Entry<Road, TrafficLight> e : ic.getLights().entrySet()) {
-            Road r = e.getKey();
-            double stopT = r.getLength() - hw;
-            if (stopT < 0) continue;
-            double[] left  = r.localToWorld(stopT, -hw);
-            double[] right = r.localToWorld(stopT,  hw);
-            g.draw(new Line2D.Double(left[0],left[1],right[0],right[1]));
-        }
         g.setStroke(new BasicStroke(1));
     }
 
@@ -175,21 +157,26 @@ public class SceneRenderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Traffic Lights
+    //  Traffic Lights — bên PHẢI hướng đi, ngoài lề đường
     // ─────────────────────────────────────────────────────────────────────
 
+    /**
+     * Đặt đèn tại s = +(halfWidth + offset) trong tọa độ cục bộ road,
+     * tức là bên PHẢI hướng đi của xe, ngoài barrier.
+     * t = stopT (ngang với vạch biên ngã tư — là stop-line thực tế).
+     */
     private void drawTrafficLights(Graphics2D g, IntersectionController ic) {
         for (Map.Entry<Road, TrafficLight> e : ic.getLights().entrySet()) {
             Road road = e.getKey();
             TrafficLight tl = e.getValue();
 
-            // Vị trí đèn: bên trái của xe (s < 0 so với chiều đi, offset thêm ngoài barrier)
-            double hw = road.getHalfWidth();
+            double hw   = road.getHalfWidth();
             double stopT = road.getLength() - hw;
             if (stopT < 0) continue;
 
-            // Đặt đèn bên trái lề đường (s = -hw - 16)
-            double[] pos = road.localToWorld(stopT, -hw - 16);
+            // BÊN PHẢI hướng đi = s > 0, ngoài barrier = s > hw
+            double lightS = hw + 18;   // 18px ngoài barrier (vùng "vỉa hè / đường đi bộ")
+            double[] pos  = road.localToWorld(stopT, lightS);
             tl.setRenderPos(pos[0], pos[1]);
 
             drawOneLight(g, tl);
@@ -197,49 +184,49 @@ public class SceneRenderer {
     }
 
     private void drawOneLight(Graphics2D g, TrafficLight tl) {
-        double rx = tl.getRenderX(), ry = tl.getRenderY();
-        int bw = 12, bh = 30;
+        int bw=13, bh=32;
+        double rx=tl.getRenderX(), ry=tl.getRenderY();
 
         // Housing
-        g.setColor(new Color(28, 28, 28));
-        g.fillRoundRect((int)(rx-bw/2), (int)(ry-bh/2), bw, bh, 4, 4);
-        g.setColor(new Color(50,50,50));
+        g.setColor(new Color(25,25,25));
+        g.fillRoundRect((int)(rx-bw/2),(int)(ry-bh/2), bw, bh, 4, 4);
+        g.setColor(new Color(55,55,55));
         g.setStroke(new BasicStroke(0.8f));
-        g.drawRoundRect((int)(rx-bw/2), (int)(ry-bh/2), bw, bh, 4, 4);
+        g.drawRoundRect((int)(rx-bw/2),(int)(ry-bh/2), bw, bh, 4, 4);
         g.setStroke(new BasicStroke(1));
 
-        // 3 bóng đèn
-        int r = 4;
-        int[] yy = {(int)(ry-bh/2+6), (int)(ry), (int)(ry+bh/2-6)};
-        Color[] base = {Color.DARK_GRAY, Color.DARK_GRAY, Color.DARK_GRAY};
-        switch (tl.getState()) {
-            case RED    -> base[0] = new Color(255, 50, 50);
-            case YELLOW -> base[1] = new Color(255, 200, 0);
-            case GREEN  -> base[2] = new Color(0, 220, 80);
+        // 3 bóng đèn: đỏ (top) / vàng (mid) / xanh (bot)
+        int r=4;
+        int[] yy={(int)(ry-bh/2+7),(int)(ry),(int)(ry+bh/2-7)};
+        Color[] base={Color.DARK_GRAY, Color.DARK_GRAY, Color.DARK_GRAY};
+        switch(tl.getState()){
+            case RED    -> base[0]=new Color(255,55,55);
+            case YELLOW -> base[1]=new Color(255,200,0);
+            case GREEN  -> base[2]=new Color(0,215,80);
         }
-        for (int i = 0; i < 3; i++) {
-            if (!base[i].equals(Color.DARK_GRAY)) {
-                // Glow
-                g.setColor(new Color(base[i].getRed(), base[i].getGreen(), base[i].getBlue(), 50));
-                g.fillOval((int)(rx-r*2), (int)(yy[i]-r*2), r*4, r*4);
+        for(int i=0;i<3;i++){
+            if(!base[i].equals(Color.DARK_GRAY)){
+                // glow
+                g.setColor(new Color(base[i].getRed(),base[i].getGreen(),base[i].getBlue(),55));
+                g.fillOval((int)(rx-r*2),(int)(yy[i]-r*2),r*4,r*4);
             }
             g.setColor(base[i]);
-            g.fillOval((int)(rx-r), (int)(yy[i]-r), r*2, r*2);
+            g.fillOval((int)(rx-r),(int)(yy[i]-r),r*2,r*2);
         }
 
-        // Countdown (thời gian còn lại)
-        double left = tl.getTimeLeft();
-        if (left > 0.1) {
-            g.setFont(new Font("Monospaced", Font.BOLD, 8));
+        // Countdown
+        double left=tl.getTimeLeft();
+        if(left>0.09){
+            g.setFont(new Font("Monospaced",Font.BOLD,8));
             g.setColor(Color.WHITE);
-            String s = String.format("%.0f", Math.ceil(left));
-            FontMetrics fm = g.getFontMetrics();
-            g.drawString(s, (float)(rx - fm.stringWidth(s)/2.0), (float)(ry + bh/2 + 9));
+            String s=String.format("%.0f",Math.ceil(left));
+            FontMetrics fm=g.getFontMetrics();
+            g.drawString(s,(float)(rx-fm.stringWidth(s)/2.0),(float)(ry+bh/2+9));
         }
 
-        // Cột đèn
-        g.setColor(new Color(80, 80, 80));
-        g.fillRect((int)(rx-1), (int)(ry+bh/2), 2, 10);
+        // Cột
+        g.setColor(new Color(75,75,75));
+        g.fillRect((int)(rx-1),(int)(ry+bh/2),2,11);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -247,11 +234,11 @@ public class SceneRenderer {
     // ─────────────────────────────────────────────────────────────────────
 
     private void drawNode(Graphics2D g, Node n) {
-        double r=Node.ARRIVAL_RADIUS, x=n.getX(), y=n.getY();
+        double r=Node.ARRIVAL_RADIUS,x=n.getX(),y=n.getY();
         g.setColor(C_NODE_F); g.fill(new Ellipse2D.Double(x-r,y-r,r*2,r*2));
         g.setColor(C_NODE_R); g.setStroke(new BasicStroke(1.5f));
         g.draw(new Ellipse2D.Double(x-r,y-r,r*2,r*2)); g.setStroke(new BasicStroke(1));
-        g.setColor(new Color(170,200,240)); g.setFont(new Font("Monospaced",Font.BOLD,8));
+        g.setColor(new Color(165,195,235)); g.setFont(new Font("Monospaced",Font.BOLD,8));
         FontMetrics fm=g.getFontMetrics(); String lbl=n.getId();
         g.drawString(lbl,(float)(x-fm.stringWidth(lbl)/2.0),(float)(y-r-3));
     }
@@ -287,50 +274,33 @@ public class SceneRenderer {
         double hw=v.getHitboxWidth()/2, hh=v.getHitboxHeight()/2;
         Color bc=vColor(v);
 
-        // Shadow
         g2.setColor(new Color(0,0,0,55));
         g2.fill(new RoundRectangle2D.Double(-hw+2,-hh+2,hw*2,hh*2,5,5));
-
-        // Body
         g2.setColor(bc);
         g2.fill(new RoundRectangle2D.Double(-hw,-hh,hw*2,hh*2,5,5));
 
-        // Roof
-        double rw=hw*0.65, rh=hh*0.5;
+        double rw=hw*0.65,rh=hh*0.5;
         g2.setColor(bc.darker());
         g2.fill(new RoundRectangle2D.Double(-rw,-rh*0.4,rw*2,rh*1.6,3,3));
 
-        // Windshield
         g2.setColor(new Color(180,230,255,190));
         g2.fill(new RoundRectangle2D.Double(-rw+1,-hh+2,rw*2-2,hh*0.35,2,2));
-
-        // Rear window
         g2.fill(new RoundRectangle2D.Double(-rw+1,hh*0.55,rw*2-2,hh*0.25,2,2));
 
-        // Headlights
         g2.setColor(new Color(255,255,200,220));
         g2.fill(new Ellipse2D.Double(-hw+1,-hh+1,hw*0.7,3));
         g2.fill(new Ellipse2D.Double(hw*0.3,-hh+1,hw*0.7,3));
 
-        // Taillights
-        boolean braking = v.getState()==Vehicle.State.SLOWING
-                       || v.getState()==Vehicle.State.STOPPED
-                       || v.getState()==Vehicle.State.WAITING_LIGHT;
-        g2.setColor(braking ? new Color(255,60,60,230) : new Color(160,30,30,180));
+        boolean braking=v.getState()==Vehicle.State.SLOWING
+                     ||v.getState()==Vehicle.State.STOPPED
+                     ||v.getState()==Vehicle.State.WAITING_LIGHT;
+        g2.setColor(braking?new Color(255,60,60,230):new Color(155,30,30,180));
         g2.fill(new Ellipse2D.Double(-hw+1,hh-4,hw*0.7,3));
         g2.fill(new Ellipse2D.Double(hw*0.3,hh-4,hw*0.7,3));
 
-        // Overtake / yield tint
-        if (v.isOvertaking()) {
-            g2.setColor(new Color(155,89,182,100));
-            g2.fill(new RoundRectangle2D.Double(-rw,-rh*0.4,rw*2,rh*0.5,2,2));
-        }
-        if (v.getState()==Vehicle.State.YIELDING) {
-            g2.setColor(new Color(241,196,15,100));
-            g2.fill(new RoundRectangle2D.Double(-rw,-rh*0.4,rw*2,rh*0.5,2,2));
-        }
+        if(v.isOvertaking()){g2.setColor(new Color(155,89,182,100));g2.fill(new RoundRectangle2D.Double(-rw,-rh*0.4,rw*2,rh*0.5,2,2));}
+        if(v.getState()==Vehicle.State.YIELDING){g2.setColor(new Color(241,196,15,100));g2.fill(new RoundRectangle2D.Double(-rw,-rh*0.4,rw*2,rh*0.5,2,2));}
 
-        // Outline
         g2.setColor(bc.darker().darker()); g2.setStroke(new BasicStroke(0.8f));
         g2.draw(new RoundRectangle2D.Double(-hw,-hh,hw*2,hh*2,5,5));
         g2.setStroke(new BasicStroke(1));
@@ -342,7 +312,7 @@ public class SceneRenderer {
     // ─────────────────────────────────────────────────────────────────────
 
     private void drawHitbox(Graphics2D g, Vehicle v) {
-        double[][] c=v.getHitboxCorners();
+        double[][]c=v.getHitboxCorners();
         Path2D p=new Path2D.Double(); p.moveTo(c[0][0],c[0][1]);
         for(int i=1;i<4;i++) p.lineTo(c[i][0],c[i][1]); p.closePath();
         double r=v.getHitboxRadius();
@@ -372,7 +342,7 @@ public class SceneRenderer {
     // ─────────────────────────────────────────────────────────────────────
 
     private Color vColor(Vehicle v) {
-        return switch(v.getState()) {
+        return switch(v.getState()){
             case WAITING_LIGHT -> C_WAITING;
             case YIELDING      -> C_YIELD;
             case STOPPED       -> C_STOPPED;
@@ -382,10 +352,10 @@ public class SceneRenderer {
         };
     }
 
-    private void aa(Graphics2D g) {
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+    private void aa(Graphics2D g){
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,    RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING,       RenderingHints.VALUE_RENDER_QUALITY);
     }
 
     public void setVehicleMode(VehicleMode m){ vehicleMode=m; }

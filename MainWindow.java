@@ -3,18 +3,20 @@ import java.awt.*;
 import java.awt.event.*;
 
 /**
- * MainWindow — Cửa sổ chính.
- *
- * Lưới 4×3: 12 node nội (ngã tư), 14 stub entry/exit.
- * Mỗi node nội có một IntersectionController với 4 đèn.
+ * MainWindow v5:
+ *  • cellW = cellH = 460  (đường gấp đôi so với v4)
+ *  • laneWidth = 90, laneCount = 2  → halfWidth = 90px (2 làn × 45px, mỗi làn chứa 3 xe rộng 14px)
+ *  • stubLen = 150 (gấp đôi)
+ *  • icHalfWidth = 90 = road.halfWidth (stop-line ĐÚNG tại biên ngã tư)
+ *  • Vehicle: 14×26px (to hơn để dễ thấy trên đường rộng)
  */
 public class MainWindow extends JFrame {
 
-    private static final int WIN_W = 1090;
+    private static final int WIN_W = 1100;
     private static final int WIN_H =  700;
 
     public MainWindow() {
-        super("🚗  Traffic Simulation  —  Traffic Lights + Bezier Turns + Yield");
+        super("🚗  Traffic Simulation v5  —  Proper Traffic Lights + Wide Lanes");
 
         RoadNetwork   network  = buildNetwork();
         SoundManager  sound    = new SoundManager();
@@ -29,7 +31,7 @@ public class MainWindow extends JFrame {
 
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setPreferredSize(new Dimension(WIN_W, WIN_H));
-        setMinimumSize(new Dimension(750, 520));
+        setMinimumSize(new Dimension(750, 500));
         pack();
         setLocationRelativeTo(null);
 
@@ -41,18 +43,25 @@ public class MainWindow extends JFrame {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Build road network
-    // ─────────────────────────────────────────────────────────────────────
 
     private RoadNetwork buildNetwork() {
         RoadNetwork net = new RoadNetwork();
 
-        int    cols      = 4, rows = 3;
-        double originX   = 120, originY = 110;
-        double cellW     = 230, cellH  = 230;
-        double laneWidth = 32;      // px/làn; halfWidth = 32*2/2 = 32
+        // ── Thông số ──────────────────────────────────────────────────────
+        int    cols      = 4,   rows     = 3;
+        double originX   = 200, originY  = 180;
+
+        // Đường dài gấp đôi so với v4
+        double cellW     = 460, cellH    = 460;
+
+        // Làn rộng 3 xe (xe rộng 14px × 3 = 42px, +3px margin mỗi bên = ~45px/làn)
+        // laneCount=2 → halfWidth = 90*2/2 = 90px; mỗi làn = 45px chứa 3 xe 14px
+        double laneWidth = 90;
         int    laneCount = 2;
-        double stubLen   = 75;
+        // halfWidth = laneWidth * laneCount / 2 = 90
+
+        // Stub gấp đôi
+        double stubLen   = 150;
 
         // ── Grid nodes ────────────────────────────────────────────────────
         Node[][] grid = new Node[rows][cols];
@@ -62,23 +71,26 @@ public class MainWindow extends JFrame {
                 net.addNode(grid[r][c]);
             }
 
-        // ── Internal bidirectional roads ──────────────────────────────────
+        // ── Đường nội bộ 2 chiều ──────────────────────────────────────────
         for (int r = 0; r < rows; r++)
             for (int c = 0; c < cols-1; c++)
                 net.addBidirectionalRoad("H"+c+r+"E","H"+c+r+"W",
                         grid[r][c], grid[r][c+1], laneWidth, laneCount);
+
         for (int c = 0; c < cols; c++)
             for (int r = 0; r < rows-1; r++)
                 net.addBidirectionalRoad("V"+c+r+"S","V"+c+r+"N",
                         grid[r][c], grid[r+1][c], laneWidth, laneCount);
 
-        // ── IntersectionController cho tất cả 12 grid nodes ──────────────
-        double icHalfWidth = laneWidth * laneCount;   // 64px — hộp ngã tư
+        // ── IntersectionController: icHalfWidth = road.halfWidth = 90 ─────
+        // Đây là khoảng cách từ tâm ngã tư đến stop-line = ĐÚNG tại biên ngã tư
+        double icHalfWidth = laneWidth; // = 90 = halfWidth của road (laneWidth*laneCount/2 = 90)
+
         for (int r = 0; r < rows; r++)
             for (int c = 0; c < cols; c++)
                 net.addIntersection(grid[r][c], icHalfWidth);
 
-        // ── Stub entry/exit nodes ─────────────────────────────────────────
+        // ── Stub entry/exit (terminal nodes) ──────────────────────────────
         // Top
         for (int c = 0; c < cols; c++) {
             Node e = new Node("EN"+c, originX+c*cellW, originY-stubLen); net.addNode(e);
@@ -108,13 +120,18 @@ public class MainWindow extends JFrame {
             net.addRoad(s); net.addRoad(es); net.addSpawnZone(e, s);
         }
 
-        net.setDefaultVehicleSize(11, 20);
-        net.setDefaultMaxSpeed(100);
-        net.setMaxVehicles(50);
+        // ── Config phương tiện ────────────────────────────────────────────
+        // Xe 14×26px: rộng hơn để dễ thấy trên đường rộng (3 xe/làn = 45/14 ≈ 3.2 ✓)
+        net.setDefaultVehicleSize(14, 26);
+        net.setDefaultMaxSpeed(110);
+        net.setMaxVehicles(55);
 
-        for (int i = 0; i < 8; i++) net.spawnVehicle();
+        // Pre-spawn 10 xe
+        for (int i = 0; i < 10; i++) net.spawnVehicle();
 
         System.out.println(net);
+        System.out.printf("Road halfWidth=%.0f, icHalfWidth=%.0f, cellSize=%.0f%n",
+                laneWidth, icHalfWidth, cellW);
         return net;
     }
 }

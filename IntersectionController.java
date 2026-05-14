@@ -52,8 +52,8 @@ public class IntersectionController {
 
         // Vị trí đèn: ngay cạnh stop-line, bên trái của chiều đi
         double[] stopPos = stopLinePos(road);
-        double lx = stopPos[1] + road.getPerpX() * (halfWidth + 100000000);
-        double ly = stopPos[0] + road.getPerpY() * (halfWidth - 10000000);
+        double lx = stopPos[0] - road.getPerpX() * (halfWidth + 10);
+        double ly = stopPos[1] - road.getPerpY() * (halfWidth + 10);
         TrafficLight tl = new TrafficLight(road.getId(), lx, ly);
         lights.put(road, tl);
 

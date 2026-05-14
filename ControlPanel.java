@@ -1,7 +1,7 @@
-import java.awt.*;
-import java.util.Collection;
 import javax.swing.*;
 import javax.swing.border.*;
+import java.awt.*;
+import java.util.Collection;
 
 public class ControlPanel extends JPanel {
 
@@ -35,20 +35,15 @@ public class ControlPanel extends JPanel {
         // ── Điều khiển ────────────────────────────────────────────────────
         addSection("Điều khiển");
         JButton btnPause = makeButton("⏸  Tạm dừng", ACCENT);
-        btnPause.setForeground(ACCENT);
         btnPause.addActionListener(e -> {
             simPanel.togglePause();
             btnPause.setText(simPanel.isPaused() ? "▶  Tiếp tục" : "⏸  Tạm dừng");
         });
         addFull(btnPause); addGap(3);
-
         JButton btnReset = makeButton("🔄  Reset", new Color(180,70,50));
-        btnReset.setForeground(ACCENT);
         btnReset.addActionListener(e -> simPanel.resetSim());
         addFull(btnReset); addGap(3);
-
         JButton btnSpawn = makeButton("➕  Sinh 1 xe", ACCENT2);
-        btnSpawn.setForeground(ACCENT);
         btnSpawn.addActionListener(e -> simPanel.spawnOne());
         addFull(btnSpawn);
 
