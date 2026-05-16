@@ -57,6 +57,8 @@ public class Node {
         if (!outgoingRoads.contains(road)) outgoingRoads.add(road);
     }
 
+    void removeOutgoingRoad(Road road) { outgoingRoads.remove(road); }
+
     /** Danh sách chỉ đọc các đường đi ra. */
     public List<Road> getOutgoingRoads() {
         return Collections.unmodifiableList(outgoingRoads);

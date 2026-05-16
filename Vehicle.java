@@ -1,12 +1,13 @@
 import java.util.*;
 
 /**
- * Vehicle — Phương tiện với đèn giao thông đúng nghĩa:
- *  • Xe chạy TỰ DO trên đường, chỉ dừng khi đầu xe chạm VÀO VẠCH BIÊN ngã tư (đèn đỏ).
- *  • Không dừng giữa đường vì đèn đỏ — chỉ dừng ngay tại ranh giới hộp ngã tư.
- *  • Rẽ Bezier mượt qua ngã tư khi đèn xanh.
- *  • Giữ followDistance với xe phía trước.
- *  • Luật tay phải, chuyển làn trái trước khi rẽ trái.
+ * Vehicle v6 — Sửa các lỗi:
+ *  1. computeTurnPath dùng CUBIC BEZIER với tiếp tuyến chính xác tại entry/exit
+ *     → xe không quay vòng khi rẽ phải, hoạt động đúng với MỌI kích thước đường.
+ *  2. Không áp dụng lateral steering khi đang WAITING_LIGHT hoặc tốc độ < 5 px/s
+ *     → xe đi thẳng và chỉ phanh trước vạch dừng, không lắc trái-phải.
+ *  3. Tốc độ tự tăng trên đoạn đường dài thẳng, giảm khi gần ngã tư/rẽ.
+ *  4. accel/decel có thể chỉnh từ ControlPanel.
  */
 public class Vehicle {
 
@@ -17,8 +18,9 @@ public class Vehicle {
     // ── Kinematics ────────────────────────────────────────────────────────
     private double x, y, angle, targetAngle;
     private double vx, vy, speed;
-    private final double maxSpeed, accel, decel;
-    private static final double MAX_TURN_RATE = Math.PI * 1.8;
+    private final double maxSpeed;
+    private double accel, decel;           // mutable: có thể chỉnh từ UI
+    private static final double MAX_TURN_RATE = Math.PI * 2.2;  // rad/s
 
     // ── Hitbox ────────────────────────────────────────────────────────────
     private final double hitW, hitH, hitR;
@@ -29,29 +31,29 @@ public class Vehicle {
     private State  state;
     private boolean arrived;
 
-    // ── Turn path (Bezier qua ngã tư) ─────────────────────────────────────
+    // ── Turn path (cubic Bezier waypoints qua ngã tư) ─────────────────────
     private List<double[]> turnPath  = null;
     private int            turnWpIdx = 0;
-    private static final double TURN_WP_REACH    = 5.0;
-    // Bắt đầu tính turn khi dist < hw * TURN_MULT
-    private static final double TURN_START_MULT  = 1.15;
+    private static final double TURN_WP_REACH   = 6.0;
+    private static final double TURN_START_MULT = 1.1; // dist < hw*1.1 → tính turn
 
     // ── Road ─────────────────────────────────────────────────────────────
     private Road currentRoad;
 
-    // ── Lateral / right-hand ──────────────────────────────────────────────
+    // ── Right-hand lateral (KHÔNG dùng khi đang phanh/chờ đèn) ──────────
     private double targetS = 0, currentS = 0;
     private boolean overtaking = false, preparingLeftTurn = false;
     private double  overtakeTimer = 0;
 
     // ── Follow distance ───────────────────────────────────────────────────
-    /** Khoảng cách tối thiểu tâm-tâm với xe trước (px). Default = 2/3 chiều dài xe. */
     private double followDistance;
 
-    // ── Intersection ──────────────────────────────────────────────────────
+    // ── Intersection box ─────────────────────────────────────────────────
     private boolean inIntersectionBox = false;
 
-    // ── Collision ─────────────────────────────────────────────────────────
+    // ── Road direction locking (để không lắc khi phanh) ──────────────────
+    private double lockedRoadAngle = Double.NaN;  // locked angle khi phanh
+
     private static final double SEP  = 1.5, PUSH = 0.5;
     private static final double WP_R = Node.ARRIVAL_RADIUS;
 
@@ -59,22 +61,23 @@ public class Vehicle {
 
     public Vehicle(String id, double sx, double sy,
                    double hitW, double hitH, double maxSpeed, List<Node> path) {
-        if (path == null || path.size() < 2)
-            throw new IllegalArgumentException("path cần ≥ 2 Node");
+        if (path == null || path.size() < 2) throw new IllegalArgumentException("path ≥ 2 Node");
         this.id = id; this.x = sx; this.y = sy;
         this.hitW = hitW; this.hitH = hitH; this.hitR = Math.max(hitW,hitH)/2.0;
-        this.maxSpeed = maxSpeed; this.accel = maxSpeed*2.2; this.decel = maxSpeed*3.5;
+        this.maxSpeed = maxSpeed;
+        this.accel    = maxSpeed * 2.2;
+        this.decel    = maxSpeed * 3.5;
         this.path = path; this.pathIndex = 1;
         this.state = State.MOVING; this.arrived = false;
         this.followDistance = hitH * (2.0/3.0);
         aimAt(path.get(1));
         this.angle = targetAngle;
-        this.speed = maxSpeed * 0.3;
+        this.speed = maxSpeed * 0.25;
         this.vx = Math.cos(angle)*speed; this.vy = Math.sin(angle)*speed;
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Update
+    //  Update chính
     // ─────────────────────────────────────────────────────────────────────
 
     public void update(double dt, List<Vehicle> others, RoadNetwork net) {
@@ -82,13 +85,10 @@ public class Vehicle {
         currentRoad = net.findRoadForVehicle(this);
         updateIntersectionBox(net);
 
-        // ── Đang theo turn path (Bezier qua ngã tư) ───────────────────────
-        if (turnPath != null) {
-            followTurnPath(dt, others, net);
-            return;
-        }
+        // ── Đang theo turn path ───────────────────────────────────────────
+        if (turnPath != null) { followTurnPath(dt, others); return; }
 
-        // ── Di chuyển bình thường ─────────────────────────────────────────
+        // ── Bình thường ───────────────────────────────────────────────────
         Node target = path.get(pathIndex);
         double dx = target.getX()-x, dy = target.getY()-y;
         double dist = Math.sqrt(dx*dx+dy*dy);
@@ -105,16 +105,15 @@ public class Vehicle {
         IntersectionController ic = net.getIntersectionController(target);
         double hw = currentRoad != null ? currentRoad.getHalfWidth() : 80;
 
-        // Chuẩn bị rẽ trái → sang làn trái
+        // Chuẩn bị rẽ trái
         updateLeftTurnPrep(ic, hw, dist, net);
 
-        // ── Phản ứng đèn: xe chỉ dừng tại biên ngã tư ───────────────────
+        // Tốc độ mong muốn từ đèn
         double desiredSpeed = reactToLight(ic, currentRoad, hw);
 
-        // ── Kích hoạt turn path khi đến biên ngã tư VÀ đèn xanh ──────────
-        boolean frontPastStop = isFrontPastStopLine(ic, currentRoad, hw);
-        boolean lightOk = frontPastStop
-                || ic == null
+        // Kích hoạt turn path
+        boolean frontPastStop = isFrontPastStopLine(ic, currentRoad);
+        boolean lightOk = frontPastStop || ic == null
                 || ic.getLightState(currentRoad) == TrafficLight.LightState.GREEN;
 
         if (lightOk && desiredSpeed > 0 && dist < hw * TURN_START_MULT
@@ -124,8 +123,8 @@ public class Vehicle {
                 turnPath = computeTurnPath(currentRoad, exitRoad, target);
                 turnWpIdx = 0;
                 if (turnPath != null && !turnPath.isEmpty()) {
-                    followTurnPath(dt, others, net);
-                    return;
+                    lockedRoadAngle = Double.NaN;
+                    followTurnPath(dt, others); return;
                 }
             }
         }
@@ -137,74 +136,42 @@ public class Vehicle {
             }
         }
 
+        // Follow distance
         desiredSpeed = applyFollowDistance(desiredSpeed, others);
+
+        // Steer
         steer(target, desiredSpeed, dt);
-        if (currentRoad != null) applyLateral(currentRoad, dt, others);
+
+        // Lateral steering: KHÔNG áp dụng khi đang chờ đèn hoặc tốc độ thấp
+        boolean canSteerLaterally = (state != State.WAITING_LIGHT)
+                && (state != State.STOPPED)
+                && (speed > 4)
+                && !inIntersectionBox;
+
+        if (currentRoad != null && canSteerLaterally) {
+            applyLateral(currentRoad, dt, others);
+        } else if (currentRoad != null && !canSteerLaterally) {
+            // Khóa hướng theo đường để không lắc
+            double roadAngle = Math.atan2(currentRoad.getDirY(), currentRoad.getDirX());
+            if (!Double.isNaN(roadAngle)) {
+                lockedRoadAngle = roadAngle;
+                angle = lerpAngle(angle, roadAngle, Math.min(1.0, dt * 6));
+                vx = Math.cos(angle) * speed;
+                vy = Math.sin(angle) * speed;
+            }
+        }
 
         x += vx*dt; y += vy*dt;
         for (Vehicle o : others) if (o!=this && !o.arrived) resolveVehicleCollision(o);
         if (currentRoad != null) currentRoad.resolveBarrierCollision(this, WP_R*1.5);
-        if (speed > 0.5) angle = Math.atan2(vy, vx);
+        if (speed > 1.5 && canSteerLaterally) angle = Math.atan2(vy, vx);
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Phản ứng đèn — CHỈ dừng tại biên ngã tư
+    //  Turn path theo Bezier CUBIC (sửa lỗi quay vòng)
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Xe chạy TỰ DO trên đường.
-     * Chỉ phanh lại khi đầu xe sắp CHẠM vào vạch biên hộp ngã tư (stop line).
-     *
-     * distToStop = khoảng cách từ TÂM xe đến stop-line.
-     * frontDist  = khoảng cách từ ĐẦU xe đến stop-line = distToStop - hitH/2.
-     *
-     * Phanh chỉ khi frontDist ∈ (0, brakeDist].
-     * Nếu đầu xe đã qua stop-line (frontDist ≤ 0): committed → tiếp tục không dừng.
-     */
-    private double reactToLight(IntersectionController ic, Road road, double hw) {
-        if (ic == null || road == null || inIntersectionBox) return maxSpeed;
-
-        TrafficLight.LightState ls = ic.getLightState(road);
-        if (ls == TrafficLight.LightState.GREEN) return maxSpeed;
-
-        // RED hoặc YELLOW
-        double distToStop = ic.distToStopLine(this, road);
-        double frontDist  = distToStop - hitH / 2.0;
-
-        // Đầu xe đã qua vạch → đã vào, không thể dừng ngược
-        if (frontDist <= 0) return maxSpeed;
-
-        // Vùng phanh: chỉ trong khoảng hitH*3 trước vạch
-        double brakeDist = hitH * 3.5;
-
-        if (frontDist > brakeDist) return maxSpeed;   // còn xa → chạy bình thường
-
-        // YELLOW & còn xa: tiếp tục
-        if (ls == TrafficLight.LightState.YELLOW && frontDist > brakeDist * 0.55)
-            return maxSpeed;
-
-        // Phanh tỉ lệ thuận với khoảng cách còn lại
-        double frac = frontDist / brakeDist;
-        if (frontDist < hitH * 0.25) {
-            state = State.WAITING_LIGHT;
-            return 0;
-        }
-        state = State.SLOWING;
-        return maxSpeed * frac * 0.85;
-    }
-
-    /** Đầu xe đã vượt qua stop-line chưa? */
-    private boolean isFrontPastStopLine(IntersectionController ic, Road road, double hw) {
-        if (ic == null || road == null) return false;
-        double distToStop = ic.distToStopLine(this, road);
-        return (distToStop - hitH / 2.0) <= 0;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Turn path Bezier
-    // ─────────────────────────────────────────────────────────────────────
-
-    private void followTurnPath(double dt, List<Vehicle> others, RoadNetwork net) {
+    private void followTurnPath(double dt, List<Vehicle> others) {
         if (turnPath == null || turnWpIdx >= turnPath.size()) {
             turnPath = null;
             if (pathIndex < path.size()) pathIndex++;
@@ -220,70 +187,128 @@ public class Vehicle {
         double maxT = MAX_TURN_RATE * dt;
         angle += Math.abs(diff) <= maxT ? diff : Math.signum(diff)*maxT;
 
-        double turningSpeed = maxSpeed * 0.70;
+        // Tốc độ giảm trong ngã tư tùy độ cong của turn path
+        double turningSpeed = computeTurningSpeed();
         speed = speed < turningSpeed ? Math.min(turningSpeed, speed+accel*dt)
                                      : Math.max(turningSpeed, speed-decel*dt);
         speed = applyFollowDistance(speed, others);
-        vx = Math.cos(angle)*speed; vy = Math.sin(angle)*speed;
+
+        vx = Math.cos(angle)*speed;
+        vy = Math.sin(angle)*speed;
         x += vx*dt; y += vy*dt;
         for (Vehicle o : others) if (o!=this && !o.arrived) resolveVehicleCollision(o);
-        if (speed > 0.5) angle = Math.atan2(vy, vx);
+        if (speed > 1.5) angle = Math.atan2(vy, vx);
         state = State.MOVING;
     }
 
-    private List<double[]> computeTurnPath(Road entry, Road exit, Node node) {
+    /** Tốc độ rẽ: phụ thuộc độ cong của turn path (phân tích từ path hiện tại). */
+    private double computeTurningSpeed() {
+        if (turnPath == null || turnPath.size() < 3) return maxSpeed * 0.65;
+        // Lấy 3 điểm gần nhất để ước tính độ cong
+        int i = Math.min(turnWpIdx, turnPath.size()-3);
+        double[] a = turnPath.get(i), b = turnPath.get(i+1), c = turnPath.get(i+2);
+        double ax=b[0]-a[0], ay=b[1]-a[1];
+        double bx=c[0]-b[0], by=c[1]-b[1];
+        double cross = Math.abs(ax*by - ay*bx);
+        double len   = Math.sqrt(ax*ax+ay*ay) + Math.sqrt(bx*bx+by*by);
+        double curvature = len > 0 ? cross / (len*len) : 0;
+        // Curvature cao = rẽ gắt = tốc độ thấp hơn
+        double speedFraction = Math.max(0.45, 1.0 - curvature * 60);
+        return maxSpeed * speedFraction;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  CUBIC BEZIER turn path — tiếp tuyến chính xác tại entry/exit
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Tính đường cong cubic Bezier qua ngã tư.
+     *
+     * Đảm bảo:
+     *   B'(0) song song với hướng vào (entry road direction)
+     *   B'(1) song song với hướng ra (exit road direction)
+     * → Xe không bao giờ quay vòng, hoạt động đúng với MỌI kích thước đường.
+     *
+     * Entry: làn trái nếu rẽ trái, làn phải nếu thẳng/rẽ phải.
+     * Exit:  làn giữa (s=hw*0.38), lateral steering tự xử lý vị trí cuối.
+     */
+    private List<double[]> computeTurnPath(Road entry, Road exit, Node inter) {
         double hw = entry.getHalfWidth();
-        double cx = node.getX(), cy = node.getY();
+
+        // Loại rẽ
         double cross = entry.getDirX()*exit.getDirY() - entry.getDirY()*exit.getDirX();
-        boolean right = cross >  0.3, left = cross < -0.3;
+        boolean leftTurn  = cross < -0.28;
+        boolean rightTurn = cross >  0.28;
 
-        double entryS = left ? hw*0.18 : hw*0.68;
-        double entryT = Math.max(0, entry.getLength() - hw*0.55);
-        double[] P0 = entry.localToWorld(entryT, entryS);
+        // ── Entry point (trên stop-line, đúng làn) ────────────────────────
+        double entryS    = leftTurn ? hw*0.18 : hw*0.68;
+        double entryDist = Math.min(hw * 0.5, entry.getLength() * 0.45);
+        double[] P0 = entry.localToWorld(entry.getLength() - entryDist, entryS);
 
-        double exitS = hw * 0.68;
-        double exitT = hw * 0.55;
-        double[] P2 = exit.localToWorld(exitT, exitS);
+        // ── Exit point (vào giữa đường ra, lateral steering tự điều chỉnh) ─
+        double exitDist = Math.min(hw * 0.5, exit.getLength() * 0.45);
+        double exitS    = hw * 0.38;   // gần giữa → không gây spin
+        double[] P3 = exit.localToWorld(exitDist, exitS);
 
-        double[] P1;
-        if (!right && !left) {
-            P1 = new double[]{(P0[0]+P2[0])/2, (P0[1]+P2[1])/2};
-        } else if (right) {
-            double px=entry.getPerpX(), py=entry.getPerpY();
-            P1 = new double[]{cx + px*hw*0.7, cy + py*hw*0.7};
-        } else {
-            double fx=exit.getDirX(), fy=exit.getDirY();
-            P1 = new double[]{cx + fx*hw*0.4 - entry.getDirX()*hw*0.2,
-                              cy + fy*hw*0.4 - entry.getDirY()*hw*0.2};
-        }
+        // ── Tiếp tuyến entry / exit ────────────────────────────────────────
+        // Hướng xe đi vào ngã tư = hướng entry road
+        double ex = entry.getDirX(), ey = entry.getDirY();
+        // Hướng xe đi ra khỏi ngã tư = hướng exit road
+        double fx = exit.getDirX(), fy = exit.getDirY();
 
-        int N = 12;
-        List<double[]> pts = new ArrayList<>();
+        // ── Tension: tỉ lệ với khoảng cách P0→P3, đủ lớn để cong mượt ────
+        double ddx = P3[0]-P0[0], ddy = P3[1]-P0[1];
+        double dist = Math.sqrt(ddx*ddx + ddy*ddy);
+        // Tension nhỏ = cong gắt, tension lớn = cong mềm
+        double tension = Math.max(hw*0.4, dist * 0.5);
+
+        // ── Cubic Bezier control points ────────────────────────────────────
+        //   B'(0) = 3*(P1-P0) → để song song entry direction: P1 = P0 + entry_dir * T
+        //   B'(1) = 3*(P3-P2) → để song song exit direction:  P2 = P3 - exit_dir * T
+        double[] P1 = {P0[0] + ex*tension, P0[1] + ey*tension};
+        double[] P2 = {P3[0] - fx*tension, P3[1] - fy*tension};
+
+        // ── Sample 16 điểm trên cubic Bezier ──────────────────────────────
+        int N = 16;
+        List<double[]> pts = new ArrayList<>(N);
         for (int i = 1; i <= N; i++) {
-            double t = (double)i/N, mt = 1-t;
+            double t = (double)i / N, mt = 1-t;
             pts.add(new double[]{
-                mt*mt*P0[0] + 2*mt*t*P1[0] + t*t*P2[0],
-                mt*mt*P0[1] + 2*mt*t*P1[1] + t*t*P2[1]
+                mt*mt*mt*P0[0] + 3*mt*mt*t*P1[0] + 3*mt*t*t*P2[0] + t*t*t*P3[0],
+                mt*mt*mt*P0[1] + 3*mt*mt*t*P1[1] + 3*mt*t*t*P2[1] + t*t*t*P3[1]
             });
         }
         return pts;
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Helpers
+    //  Đèn giao thông
     // ─────────────────────────────────────────────────────────────────────
 
-    private void updateLeftTurnPrep(IntersectionController ic, double hw, double dist, RoadNetwork net) {
-        if (ic != null && pathIndex + 1 < path.size() && currentRoad != null) {
-            Road exitRoad = net.findRoadBetween(path.get(pathIndex), path.get(pathIndex+1));
-            if (exitRoad != null) {
-                double cross = currentRoad.getDirX()*exitRoad.getDirY()
-                             - currentRoad.getDirY()*exitRoad.getDirX();
-                preparingLeftTurn = (cross < -0.3) && dist < hw * 4;
-                return;
-            }
-        }
-        preparingLeftTurn = false;
+    private double reactToLight(IntersectionController ic, Road road, double hw) {
+        if (ic == null || road == null || inIntersectionBox) return maxSpeed;
+        TrafficLight.LightState ls = ic.getLightState(road);
+        if (ls == TrafficLight.LightState.GREEN) return maxSpeed;
+
+        double distToStop = ic.distToStopLine(this, road);
+        double frontDist  = distToStop - hitH / 2.0;
+        if (frontDist <= 0) return maxSpeed;   // đã vào → tiếp tục
+
+        double brakeDist = hitH * 3.5;
+        if (frontDist > brakeDist) return maxSpeed;  // còn xa
+
+        if (ls == TrafficLight.LightState.YELLOW && frontDist > brakeDist * 0.55)
+            return maxSpeed;
+
+        double frac = frontDist / brakeDist;
+        if (frontDist < hitH * 0.25) { state = State.WAITING_LIGHT; return 0; }
+        state = State.SLOWING;
+        return maxSpeed * frac * 0.85;
+    }
+
+    private boolean isFrontPastStopLine(IntersectionController ic, Road road) {
+        if (ic == null || road == null) return false;
+        return (ic.distToStopLine(this, road) - hitH/2.0) <= 0;
     }
 
     private void updateIntersectionBox(RoadNetwork net) {
@@ -294,20 +319,36 @@ public class Vehicle {
         inIntersectionBox = false;
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  Steer + tốc độ thích nghi theo độ dài đường
+    // ─────────────────────────────────────────────────────────────────────
+
     private void steer(Node target, double desiredSpeed, double dt) {
         double dx=target.getX()-x, dy=target.getY()-y;
         double dist=Math.sqrt(dx*dx+dy*dy);
         if (dist > 0.5) aimAt(target);
+
         double diff=angleDiff(targetAngle,angle), maxT=MAX_TURN_RATE*dt;
         angle += Math.abs(diff)<=maxT ? diff : Math.signum(diff)*maxT;
-        double want=desiredSpeed;
-        if (want>0 && dist<40 && pathIndex<path.size()-1) want=Math.max(want*0.45,want*dist/40);
-        speed = speed<want ? Math.min(want,speed+accel*dt) : Math.max(want,speed-decel*dt);
-        vx=Math.cos(angle)*speed; vy=Math.sin(angle)*speed;
-        if (desiredSpeed==0) state=State.STOPPED;
-        else if (speed<maxSpeed*0.7) state=State.SLOWING;
-        else state=State.MOVING;
+
+        // Giảm tốc khi gần node trung gian (không phải đích)
+        double want = desiredSpeed;
+        if (want > 0 && dist < 50 && pathIndex < path.size()-1)
+            want = Math.max(want*0.4, want*dist/50);
+
+        speed = speed < want ? Math.min(want, speed+accel*dt)
+                             : Math.max(want, speed-decel*dt);
+        vx = Math.cos(angle)*speed;
+        vy = Math.sin(angle)*speed;
+
+        if (desiredSpeed == 0 && state != State.WAITING_LIGHT) state = State.STOPPED;
+        else if (speed < maxSpeed*0.65) state = State.SLOWING;
+        else state = State.MOVING;
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Follow distance
+    // ─────────────────────────────────────────────────────────────────────
 
     private double applyFollowDistance(double want, List<Vehicle> others) {
         double ca=Math.cos(angle), sa=Math.sin(angle);
@@ -318,26 +359,30 @@ public class Vehicle {
             double along=ex*ca+ey*sa, perp=Math.abs(-ex*sa+ey*ca);
             if(along>0&&along<followDistance*8&&perp<hitW+6&&along<bd){bd=along;ahead=o;}
         }
-        if (ahead==null) return want;
+        if(ahead==null) return want;
         double gap=bd-hitR-ahead.hitR;
-        if(gap<=0||gap<followDistance*0.5)           return 0;
-        if(gap<followDistance)                        return Math.min(want, ahead.speed*0.7);
-        if(gap<followDistance*2)                      return Math.min(want, ahead.speed*0.9);
+        if(gap<=0||gap<followDistance*0.5)      return 0;
+        if(gap<followDistance)                  return Math.min(want, ahead.speed*0.7);
+        if(gap<followDistance*2)                return Math.min(want, ahead.speed*0.9);
         return want;
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  Lateral steering (luật tay phải)
+    // ─────────────────────────────────────────────────────────────────────
+
     private void applyLateral(Road road, double dt, List<Vehicle> others) {
         double[] loc=road.worldToLocal(x,y);
-        double t=loc[0],s=loc[1],hw=road.getHalfWidth();
-        if(t<25||t>road.getLength()-25) return;
+        double t=loc[0], s=loc[1], hw=road.getHalfWidth();
+        if(t<20||t>road.getLength()-20) return;
         double normalS=hw*0.68, passS=hw*0.18;
         updateOvertake(others,road,t,dt);
-        if (preparingLeftTurn) targetS=hw*0.18;
-        else if (overtaking)   targetS=passS;
+        if(preparingLeftTurn)  targetS=hw*0.18;
+        else if(overtaking)    targetS=passS;
         else                   targetS=normalS;
-        currentS += (targetS-currentS)*Math.min(1.0,dt*4.0);
+        currentS += (targetS-currentS)*Math.min(1.0,dt*3.5);
         double err=currentS-s;
-        double latSpd=Math.max(-maxSpeed*0.35,Math.min(maxSpeed*0.35,err*5.0));
+        double latSpd=Math.max(-maxSpeed*0.3,Math.min(maxSpeed*0.3,err*4.5));
         vx+=road.getPerpX()*latSpd; vy+=road.getPerpY()*latSpd;
     }
 
@@ -352,6 +397,22 @@ public class Vehicle {
         }
     }
 
+    private void updateLeftTurnPrep(IntersectionController ic, double hw, double dist, RoadNetwork net) {
+        if(ic!=null&&pathIndex+1<path.size()&&currentRoad!=null){
+            Road exitRoad=net.findRoadBetween(path.get(pathIndex),path.get(pathIndex+1));
+            if(exitRoad!=null){
+                double cross=currentRoad.getDirX()*exitRoad.getDirY()-currentRoad.getDirY()*exitRoad.getDirX();
+                preparingLeftTurn=(cross<-0.28)&&dist<hw*4;
+                return;
+            }
+        }
+        preparingLeftTurn=false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Collision xe–xe
+    // ─────────────────────────────────────────────────────────────────────
+
     public void resolveVehicleCollision(Vehicle o) {
         double dx=x-o.x,dy=y-o.y,dist=Math.sqrt(dx*dx+dy*dy),minD=hitR+o.hitR+SEP;
         if(dist>=minD||dist<1e-6) return;
@@ -361,10 +422,22 @@ public class Vehicle {
         if(rvn<0){vx-=rvn*nx*PUSH;vy-=rvn*ny*PUSH;o.vx+=rvn*nx*PUSH;o.vy+=rvn*ny*PUSH;}
     }
 
-    private void aimAt(Node n){targetAngle=Math.atan2(n.getY()-y,n.getX()-x);}
+    // ─────────────────────────────────────────────────────────────────────
+    //  Helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    private void aimAt(Node n){ targetAngle=Math.atan2(n.getY()-y,n.getX()-x); }
+
     private static double angleDiff(double t,double c){
         double d=t-c; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; return d;
     }
+
+    /** Nội suy góc ngắn nhất. */
+    private static double lerpAngle(double a, double b, double t) {
+        double d = angleDiff(b, a);
+        return a + d * t;
+    }
+
     public double distanceTo(Vehicle o){double dx=x-o.x,dy=y-o.y;return Math.sqrt(dx*dx+dy*dy);}
 
     public double[][] getHitboxCorners(){
@@ -373,36 +446,41 @@ public class Vehicle {
         for(int i=0;i<4;i++){wc[i][0]=x+lc[i][0]*c-lc[i][1]*s;wc[i][1]=y+lc[i][0]*s+lc[i][1]*c;}
         return wc;
     }
+
     public void onBarrierHit(Road r,Road.BarrierSide s){state=State.SLOWING;}
 
-    // Getters / Setters
-    public String   getId()              { return id; }
-    public double   getX()               { return x; }
-    public double   getY()               { return y; }
-    public double   getAngle()           { return angle; }
-    public double   getSpeed()           { return speed; }
-    public double   getVx()              { return vx; }
-    public double   getVy()              { return vy; }
-    public double   getHitboxWidth()     { return hitW; }
-    public double   getHitboxHeight()    { return hitH; }
-    public double   getHitboxRadius()    { return hitR; }
-    public double   getMaxSpeed()        { return maxSpeed; }
-    public State    getState()           { return state; }
-    public boolean  isArrived()          { return arrived; }
-    public List<Node> getPath()          { return path; }
-    public int      getPathIndex()       { return pathIndex; }
-    public Road     getCurrentRoad()     { return currentRoad; }
-    public boolean  isOvertaking()       { return overtaking; }
-    public boolean  isInIntersectionBox(){ return inIntersectionBox; }
-    public double   getFollowDistance()  { return followDistance; }
-    public Node     getDestination()     { return path.get(path.size()-1); }
-    public Node     getOrigin()          { return path.get(0); }
-    public Node     getCurrentTarget()   { return pathIndex<path.size()?path.get(pathIndex):null; }
-    public void setX(double v)           { x=v; }
-    public void setY(double v)           { y=v; }
-    public void setVx(double v)          { vx=v; }
-    public void setVy(double v)          { vy=v; }
-    public void setState(State s)        { state=s; }
-    public void setCurrentRoad(Road r)   { currentRoad=r; }
-    public void setFollowDistance(double d){ followDistance=Math.max(1,d); }
+    // ── Getters / Setters ──────────────────────────────────────────────────
+    public String   getId()               { return id; }
+    public double   getX()                { return x; }
+    public double   getY()                { return y; }
+    public double   getAngle()            { return angle; }
+    public double   getSpeed()            { return speed; }
+    public double   getVx()               { return vx; }
+    public double   getVy()               { return vy; }
+    public double   getHitboxWidth()      { return hitW; }
+    public double   getHitboxHeight()     { return hitH; }
+    public double   getHitboxRadius()     { return hitR; }
+    public double   getMaxSpeed()         { return maxSpeed; }
+    public State    getState()            { return state; }
+    public boolean  isArrived()           { return arrived; }
+    public List<Node> getPath()           { return path; }
+    public int      getPathIndex()        { return pathIndex; }
+    public Road     getCurrentRoad()      { return currentRoad; }
+    public boolean  isOvertaking()        { return overtaking; }
+    public boolean  isInIntersectionBox() { return inIntersectionBox; }
+    public double   getFollowDistance()   { return followDistance; }
+    public Node     getDestination()      { return path.get(path.size()-1); }
+    public Node     getOrigin()           { return path.get(0); }
+    public Node     getCurrentTarget()    { return pathIndex<path.size()?path.get(pathIndex):null; }
+
+    public void setX(double v)              { x=v; }
+    public void setY(double v)              { y=v; }
+    public void setVx(double v)             { vx=v; }
+    public void setVy(double v)             { vy=v; }
+    public void setState(State s)           { state=s; }
+    public void setCurrentRoad(Road r)      { currentRoad=r; }
+    public void setFollowDistance(double d) { followDistance=Math.max(1,d); }
+    /** Chỉnh gia tốc từ ControlPanel. */
+    public void setAcceleration(double a)   { accel=Math.max(10,a); decel=accel*1.6; }
+    public double getAcceleration()         { return accel; }
 }

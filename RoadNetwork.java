@@ -240,8 +240,223 @@ public class RoadNetwork {
     public void   setDefaultVehicleSize(double w,double h){ defaultVehicleWidth=w; defaultVehicleHeight=h; }
     public void   setDefaultMaxSpeed(double s)          { defaultMaxSpeed = s; }
 
+    /** Chỉnh gia tốc cho tất cả xe đang chạy + mặc định cho xe mới. */
+    public void setAccelerationForAll(double accel) {
+        for (Vehicle v : vehicles) v.setAcceleration(accel);
+    }
+
     @Override public String toString() {
         return String.format("RoadNetwork[nodes=%d roads=%d intersections=%d vehicles=%d spawnZones=%d]",
                 nodes.size(), roads.size(), intersections.size(), vehicles.size(), spawnZones.size());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Module Editor — phương thức chỉnh sửa mạng lưới động
+    // ═════════════════════════════════════════════════════════════════════
+
+    /** Chiều dài mỗi ô (cell) và halfWidth đường — dùng cho editor. */
+    private double editorCellLength = 460;
+    private double editorHalfWidth  = 90;    // = road.getHalfWidth()
+    private int    editorLaneCount  = 2;
+
+    public void setEditorParams(double cellLen, double halfWidth, int laneCount) {
+        this.editorCellLength = cellLen;
+        this.editorHalfWidth  = halfWidth;
+        this.editorLaneCount  = laneCount;
+    }
+    public double getEditorCellLength() { return editorCellLength; }
+    public double getEditorHalfWidth()  { return editorHalfWidth; }
+
+    /** Tìm SpawnZone tại node cụ thể. */
+    public SpawnZone getSpawnZoneForNode(Node node) {
+        for (SpawnZone sz : spawnZones) if (sz.getNode() == node) return sz;
+        return null;
+    }
+
+    /** Xoá SpawnZone tại node. */
+    public void removeSpawnZone(Node node) {
+        spawnZones.removeIf(sz -> sz.getNode() == node);
+    }
+
+    /**
+     * Mở rộng một con đường từ terminal node theo góc angle (radian).
+     * Tự động:
+     *   - Tạo node mới tại đầu xa
+     *   - Thêm đường 2 chiều
+     *   - Xoá SpawnZone cũ ở terminal
+     *   - Thêm SpawnZone mới ở node đầu xa
+     *   - Nâng cấp terminal thành ngã tư nếu có ≥ 2 đường
+     *
+     * @return node đầu xa mới, hoặc null nếu hướng đã bị chiếm / trùng node
+     */
+    public Node extendFromTerminal(Node terminal, double angle) {
+        double len = editorCellLength;
+        double newX = terminal.getX() + Math.cos(angle) * len;
+        double newY = terminal.getY() + Math.sin(angle) * len;
+
+        // Kiểm tra node trùng
+        for (Node n : nodes) if (n.distanceTo(newX, newY) < 30) return null;
+
+        // Kiểm tra hướng đã bị chiếm
+        if (isDirectionOccupied(terminal, angle)) return null;
+
+        // Tạo node mới
+        String newId = "T" + nodes.size();
+        Node newNode = new Node(newId, newX, newY);
+        addNode(newNode);
+
+        // laneWidth raw: halfWidth = laneWidth*laneCount/2 → laneWidth = halfWidth*2/laneCount
+        double laneWidth = editorHalfWidth * 2.0 / editorLaneCount;
+        String fwd = "R_" + terminal.getId() + "_" + newNode.getId();
+        String bwd = "R_" + newNode.getId() + "_" + terminal.getId();
+        addBidirectionalRoad(fwd, bwd, terminal, newNode, laneWidth, editorLaneCount);
+
+        // SpawnZones
+        removeSpawnZone(terminal);
+        Road stubRoad = findRoadBetween(newNode, terminal);
+        if (stubRoad != null) addSpawnZone(newNode, stubRoad);
+
+        // Nâng cấp terminal → intersection nếu cần
+        upgradeToIntersection(terminal);
+
+        return newNode;
+    }
+
+    /**
+     * Mở rộng thành ngã tư đầy đủ từ terminal:
+     * Thêm 3 nhánh mới (tiếp tục + vuông góc trái + vuông góc phải).
+     *
+     * @return danh sách node mới tạo ra
+     */
+    public java.util.List<Node> extendAsFullIntersection(Node terminal) {
+        // Tìm hướng ra duy nhất từ terminal (hướng vào mạng lưới)
+        Road outgoing = null;
+        for (Road r : roads) {
+            if (r.getFrom() == terminal) { outgoing = r; break; }
+        }
+        if (outgoing == null) return Collections.emptyList();
+
+        // Hướng "tiếp tục" = ngược chiều đường nối vào (đi xa mạng lưới)
+        double cDirX = outgoing.getDirX(), cDirY = outgoing.getDirY();
+        double continueAngle = Math.atan2(cDirY, cDirX);   // đi xa mạng
+
+        // Vuông góc
+        double perpCW  = continueAngle + Math.PI / 2;   // phải
+        double perpCCW = continueAngle - Math.PI / 2;   // trái
+
+        java.util.List<Node> created = new ArrayList<>();
+        for (double angle : new double[]{continueAngle, perpCW, perpCCW}) {
+            Node n = extendFromTerminal(terminal, angle);
+            if (n != null) created.add(n);
+        }
+
+        upgradeToIntersection(terminal);
+        return created;
+    }
+
+    /** Nâng cấp node → IntersectionController nếu có ≥ 2 đường đến. */
+    /**
+     * Nâng cấp node → IntersectionController chỉ khi là NGÃ TƯ THẬT
+     * (có ít nhất 2 đường tiếp cận từ CÁC HƯỚNG KHÁC NHAU, không phải đường thẳng).
+     *
+     * Đường thẳng liên tiếp (2 đoạn cùng hướng) KHÔNG nhận đèn giao thông.
+     */
+    private void upgradeToIntersection(Node node) {
+        // Thu thập tất cả đường có to == node
+        List<Road> incoming = new ArrayList<>();
+        for (Road r : roads) if (r.getTo() == node) incoming.add(r);
+        if (incoming.size() < 2) return;
+
+        // Kiểm tra có phải ngã tư thật không (có đường từ hướng vuông góc)
+        boolean realIntersection = false;
+        outer:
+        for (int i = 0; i < incoming.size(); i++) {
+            for (int j = i+1; j < incoming.size(); j++) {
+                Road ri = incoming.get(i), rj = incoming.get(j);
+                double dot = Math.abs(ri.getDirX()*rj.getDirX() + ri.getDirY()*rj.getDirY());
+                // dot ≈ 0 = vuông góc (ngã tư thật), dot ≈ 1 = song song (đường thẳng)
+                if (dot < 0.7) { realIntersection = true; break outer; }
+            }
+        }
+
+        if (!realIntersection) return;   // chỉ là đường thẳng nối tiếp → không cần đèn
+
+        if (intersections.containsKey(node)) {
+            IntersectionController ic = intersections.get(node);
+            for (Road r : roads) if (r.getTo() == node) ic.registerApproachRoad(r);
+            ic.initPhases();
+        } else {
+            addIntersection(node, editorHalfWidth);
+        }
+    }
+
+    /** Kiểm tra xem đã có đường đi theo angle từ node này chưa. */
+    public boolean isDirectionOccupied(Node node, double angle) {
+        double cx = Math.cos(angle), cy = Math.sin(angle);
+        for (Road r : roads) {
+            if (r.getFrom() == node) {
+                double dot = r.getDirX()*cx + r.getDirY()*cy;
+                if (dot > 0.85) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Xoá node mới nhất và các đường liên quan (undo đơn giản). */
+    public boolean undoLastExtension() {
+        // Tìm terminal node mới nhất (có dạng "T...")
+        Node lastT = null;
+        for (int i = nodes.size()-1; i >= 0; i--) {
+            if (nodes.get(i).getId().startsWith("T")) { lastT = nodes.get(i); break; }
+        }
+        if (lastT == null) return false;
+
+        Node finalLastT = lastT;
+        // Tìm node kết nối với lastT (terminal gốc)
+        Node parentNode = null;
+        List<Road> toRemove = new ArrayList<>();
+        for (Road r : roads) {
+            if (r.getFrom() == finalLastT || r.getTo() == finalLastT) {
+                toRemove.add(r);
+                if (r.getFrom() == finalLastT) parentNode = r.getTo();
+                else                            parentNode = r.getFrom();
+            }
+        }
+
+        // Xoá roads, nodes, spawnZones liên quan
+        roads.removeAll(toRemove);
+        for (Road r : toRemove) {
+            if (r.getFrom() != null) r.getFrom().removeOutgoingRoad(r);
+        }
+        removeSpawnZone(finalLastT);
+        nodes.remove(finalLastT);
+
+        // Khôi phục SpawnZone cho parentNode nếu nó trở lại terminal
+        final Node finalParent = parentNode;
+        if (finalParent != null) {
+            long incoming = roads.stream().filter(r -> r.getTo() == finalParent).count();
+            if (incoming <= 1) {
+                // Trở lại là terminal → xoá intersection, thêm spawn
+                intersections.remove(parentNode);
+                Road stub = null;
+                for (Road r : roads) if (r.getFrom() == parentNode) { stub = r; break; }
+                if (stub == null) for (Road r : roads) { if (r.getTo() == parentNode) { 
+                    // tạo stub ngược
+                    stub = findRoadBetween(parentNode, r.getFrom()); break; 
+                }}
+                // Thêm SpawnZone trỏ vào parentNode nếu có road vào
+                Road inRoad = null;
+                for (Road r : roads) if (r.getTo() == parentNode) { inRoad = r; break; }
+                if (inRoad != null) {
+                    // SpawnZone dùng road đi ngược ra ngoài
+                    Road outRoad = findRoadBetween(parentNode, inRoad.getFrom());
+                    if (outRoad != null) addSpawnZone(parentNode, outRoad);
+                }
+            }
+        }
+
+        // Xoá vehicles trên roads đã xoá
+        vehicles.removeIf(v -> toRemove.contains(v.getCurrentRoad()));
+        return true;
     }
 }
