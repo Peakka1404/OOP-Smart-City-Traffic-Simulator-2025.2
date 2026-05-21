@@ -1,3 +1,3 @@
 @echo off
-java -jar TrafficSim.jar
+java -jar trafficSim.jar
 pause
