@@ -188,7 +188,9 @@ public class RoadNetwork {
 
             double[] pt = szA.randomSpawnPoint(random);
             String id = String.format("V%03d", vehicleCounter++);
-            Vehicle v = new Vehicle(id, pt[0], pt[1], w, h, maxSpd, path);
+            String[] types = {"Car", "Ambulance", "Bicycle", "FireTruck", "Motorbike"};
+            String type = types[random.nextInt(types.length)];
+            Vehicle v = new Vehicle(id, type, pt[0], pt[1], w, h, maxSpd, path);
             vehicles.add(v);
             return v;
         }
