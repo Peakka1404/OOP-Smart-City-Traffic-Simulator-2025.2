@@ -9,11 +9,13 @@ import java.util.*;
  *  3. Tốc độ tự tăng trên đoạn đường dài thẳng, giảm khi gần ngã tư/rẽ.
  *  4. accel/decel có thể chỉnh từ ControlPanel.
  */
+
 public class Vehicle {
 
     public enum State { MOVING, SLOWING, STOPPED, WAITING_LIGHT, YIELDING, ARRIVED }
-
+    private final String type;
     private final String id;
+    
 
     // ── Kinematics ────────────────────────────────────────────────────────
     private double x, y, angle, targetAngle;
@@ -56,13 +58,14 @@ public class Vehicle {
 
     private static final double SEP  = 1.5, PUSH = 0.5;
     private static final double WP_R = Node.ARRIVAL_RADIUS;
+    
 
     // ─────────────────────────────────────────────────────────────────────
 
-    public Vehicle(String id, double sx, double sy,
-                   double hitW, double hitH, double maxSpeed, List<Node> path) {
+    public Vehicle(String id, String type, double sx, double sy,
+               double hitW, double hitH, double maxSpeed, List<Node> path) {
         if (path == null || path.size() < 2) throw new IllegalArgumentException("path ≥ 2 Node");
-        this.id = id; this.x = sx; this.y = sy;
+        this.id = id;this.type = type; this.x = sx; this.y = sy;
         this.hitW = hitW; this.hitH = hitH; this.hitR = Math.max(hitW,hitH)/2.0;
         this.maxSpeed = maxSpeed;
         this.accel    = maxSpeed * 2.2;
@@ -451,6 +454,7 @@ public class Vehicle {
 
     // ── Getters / Setters ──────────────────────────────────────────────────
     public String   getId()               { return id; }
+    public String   getType()              { return type; }
     public double   getX()                { return x; }
     public double   getY()                { return y; }
     public double   getAngle()            { return angle; }
