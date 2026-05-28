@@ -38,6 +38,22 @@ public class SceneRenderer {
 
     // ── Nơi lưu trữ NHIỀU ảnh xe ──────────────────────────────────────────
     // Dùng Map để ánh xạ Tên xe -> Ảnh tương ứng
+    // Scale riêng cho từng loại xe — chỉnh số này tùy ý
+    private static final Map<String, Double> VEHICLE_SCALE = new HashMap<>() {{
+        put("Car",       1.8);
+        put("Ambulance",  2.0);
+        put("FireTruck", 2.0);
+        put("Motorbike", 1.6);
+        put("Bicycle",   1.3);
+    }};
+    // Hệ số thu nhỏ vùng bóng so với ảnh (1.0 = bằng ảnh, 0.8 = nhỏ hơn 20%)
+private static final Map<String, Double> VEHICLE_SHADOW_FIT = new HashMap<>() {{
+    put("Car",       1.0);
+    put("Ambulance", 0.75);  // ảnh có nhiều vùng trong suốt → thu bóng lại
+    put("FireTruck", 1.0);
+    put("Motorbike", 1.0);
+    put("Bicycle",   1.0);
+}};
     private Map<String, BufferedImage> vehicleSprites = new HashMap<>();
 
     // ─────────────────────────────────────────────────────────────────────
@@ -143,59 +159,62 @@ public class SceneRenderer {
     //  Vehicle: CHẾ ĐỘ VẼ ẢNH THẬT
     // ─────────────────────────────────────────────────────────────────────
 
-    private void drawVehicleImage(Graphics2D g, Vehicle v) {
-        // Lấy đúng ảnh cho chiếc xe này
-        BufferedImage sprite = getSpriteForVehicle(v);
+private void drawVehicleImage(Graphics2D g, Vehicle v) {
+    BufferedImage sprite = getSpriteForVehicle(v);
+    if (sprite == null) { drawVehicleGraphic(g, v); return; }
 
-        if (sprite == null) {
-            drawVehicleGraphic(g, v); // Fallback nếu không có ảnh
-            return;
-        }
+    Graphics2D g2 = (Graphics2D) g.create();
+    g2.translate(v.getX(), v.getY());
+    g2.rotate(v.getAngle());
 
-        Graphics2D g2 = (Graphics2D) g.create();
-        g2.translate(v.getX(), v.getY());
-        g2.rotate(v.getAngle());
-        
-        double hw = v.getHitboxWidth() / 2;
-        double hh = v.getHitboxHeight() / 2;
-        
-        // Vẽ bóng đổ phía dưới xe
-        g2.setColor(new Color(0, 0, 0, 65));
-        g2.fill(new RoundRectangle2D.Double(-hh + 3, -hw + 3, hh * 2, hw * 2, 6, 6));
+    // Ảnh quay ngang → chiều dài xe (Height) = trục X, chiều rộng (Width) = trục Y
+double scale = VEHICLE_SCALE.getOrDefault(v.getType(), 1.6);
+double halfLen = v.getHitboxHeight() / 2 * scale;
+double halfWid = v.getHitboxWidth()  / 2 * scale;
 
-        int drawX = (int)(-hh);
-        int drawY = (int)(-hw);
-        int drawW = (int)(hh * 2); 
-        int drawH = (int)(hw * 2); 
-        
-        // Vẽ đúng cái ảnh vừa lấy ra
-        g2.drawImage(sprite, drawX, drawY, drawW, drawH, null);
-        
-        drawStateOverlaysRightFacing(g2, v, hw, hh);
-        g2.dispose();
+    // Bóng đổ — cùng kích thước ảnh, lệch nhẹ
+    g2.setColor(new Color(0, 0, 0, 65));
+    double shadowFit = VEHICLE_SHADOW_FIT.getOrDefault(v.getType(), 1.0);
+    double sLen = halfLen * shadowFit;
+    double sWid = halfWid * shadowFit;
+    g2.fill(new RoundRectangle2D.Double(
+        -sLen + sLen * 0.03,
+        -sWid + sWid * 0.03,
+        sLen * 2,
+        sWid * 2, 5, 5));
+
+    // Vẽ ảnh
+    g2.drawImage(sprite,
+        (int)(-halfLen), (int)(-halfWid),
+        (int)(halfLen * 2), (int)(halfWid * 2), null);
+
+    drawStateOverlaysRightFacing(g2, v, halfLen, halfWid);
+    g2.dispose();
+}
+
+private void drawStateOverlaysRightFacing(Graphics2D g2, Vehicle v, double halfLen, double halfWid) {
+    boolean braking = v.getState() == Vehicle.State.SLOWING
+                   || v.getState() == Vehicle.State.STOPPED
+                   || v.getState() == Vehicle.State.WAITING_LIGHT;
+
+    // Đèn hậu — nằm ở đuôi xe (x = -halfLen), 2 chấm trên/dưới
+    if (braking) g2.setColor(new Color(255, 30, 30, 230));
+    else         g2.setColor(new Color(160, 10, 10, 150));
+    double dotSize = halfWid * 0.4;
+    g2.fill(new Ellipse2D.Double(-halfLen + 1, -halfWid * 0.6, dotSize, dotSize));
+    g2.fill(new Ellipse2D.Double(-halfLen + 1,  halfWid * 0.2, dotSize, dotSize));
+
+    if (v.isOvertaking()) {
+        g2.setColor(new Color(155, 89, 182, 80));
+        g2.fill(new RoundRectangle2D.Double(
+            halfLen * 0.5, -halfWid, halfLen * 0.5, halfWid * 2, 3, 3));
     }
-
-    private void drawStateOverlaysRightFacing(Graphics2D g2, Vehicle v, double hw, double hh) {
-        boolean braking = v.getState() == Vehicle.State.SLOWING
-                        || v.getState() == Vehicle.State.STOPPED
-                        || v.getState() == Vehicle.State.WAITING_LIGHT;
-
-        if (braking) g2.setColor(new Color(255, 30, 30, 230)); 
-        else         g2.setColor(new Color(160, 10, 10, 150));  
-        
-        g2.fill(new Ellipse2D.Double(-hh + 1, -hw * 0.7, 3, hw * 0.3)); 
-        g2.fill(new Ellipse2D.Double(-hh + 1,  hw * 0.4, 3, hw * 0.3)); 
-
-        if (v.isOvertaking()) {
-            g2.setColor(new Color(155, 89, 182, 80)); 
-            g2.fill(new RoundRectangle2D.Double(hh * 0.4, -hw, hh * 0.6, hw * 2, 4, 4));
-        }
-        if (v.getState() == Vehicle.State.YIELDING) {
-            g2.setColor(new Color(241, 196, 15, 80)); 
-            g2.fill(new RoundRectangle2D.Double(hh * 0.4, -hw, hh * 0.6, hw * 2, 4, 4));
-        }
+    if (v.getState() == Vehicle.State.YIELDING) {
+        g2.setColor(new Color(241, 196, 15, 80));
+        g2.fill(new RoundRectangle2D.Double(
+            halfLen * 0.5, -halfWid, halfLen * 0.5, halfWid * 2, 3, 3));
     }
-
+}
     // ─────────────────────────────────────────────────────────────────────
     //  Vehicle: CÁC HÀM VẼ KHỐI (DỰ PHÒNG)
     // ─────────────────────────────────────────────────────────────────────
