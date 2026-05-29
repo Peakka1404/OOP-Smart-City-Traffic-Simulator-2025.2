@@ -1,16 +1,25 @@
-import java.io.File;
+import javax.sound.sampled.*;
 import java.util.*;
 import java.util.concurrent.*;
-import javax.sound.sampled.*;
+import java.util.concurrent.atomic.*;
 
 /**
- * SoundManager — Quản lý âm thanh.
- * Kết hợp tổng hợp procedural (sine/square) và phát file âm thanh (wav).
+ * SoundManager — Quản lý âm thanh tổng hợp procedural.
+ *
+ * Không cần file âm thanh — tất cả tạo từ sine/square/sawtooth wave.
  * Tất cả phát âm thanh đều bất đồng bộ (không block luồng chính).
+ *
+ * Âm thanh hỗ trợ:
+ *  • ENGINE   — tiếng động cơ (hum thấp, pitch tỉ lệ với tốc độ)
+ *  • HORN     — bấm còi (beep ngắn)
+ *  • BARRIER  — chạm lề đường (thud)
+ *  • COLLIDE  — xe chạm xe (bump)
+ *  • BRAKE    — phanh gấp (squeal)
+ *  • SIGNAL   — đèn xi-nhan (tick)
+ *  • ARRIVE   — đến đích (chime)
  */
 public class SoundManager {
 
-    private final Map<String, Clip> vehicleClips = new HashMap<>();
     private static final int   SAMPLE_RATE = 22050;
     private static final float MASTER_VOL  = 0.55f;
 
@@ -39,56 +48,15 @@ public class SoundManager {
     private enum Wave { SINE, SQUARE, SAW, TRIANGLE }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Constructor & Load
-    // ─────────────────────────────────────────────────────────────────────
-    public SoundManager() {
-        loadVehicleSounds();
-    }
-
-    private void loadVehicleSounds() {
-        Map<String, String> files = new HashMap<>() {{
-            put("Car",       "resources/Sound/CarSound.wav");
-            put("Ambulance", "resources/Sound/AmbulanceSound.wav");
-            put("FireTruck", "resources/Sound/FireTruckSound.wav");
-            put("Motorbike", "resources/Sound/MotorbikeSound.wav");
-        }};
-
-        for (Map.Entry<String, String> e : files.entrySet()) {
-            try {
-                AudioInputStream ais = AudioSystem.getAudioInputStream(new File(e.getValue()));
-                Clip clip = AudioSystem.getClip();
-                clip.open(ais);
-                vehicleClips.put(e.getKey(), clip);
-                System.out.println("[SoundManager] Loaded: " + e.getValue());
-            } catch (Exception ex) {
-                System.err.println("[SoundManager] Không load được: " + e.getValue());
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
     //  Public API
     // ─────────────────────────────────────────────────────────────────────
-
-    /** Phát âm thanh riêng của từng loại xe */
-    public void playVehicleSound(String type) {
-        if (!enabled) return;
-        Clip clip = vehicleClips.getOrDefault(type, vehicleClips.get("Car"));
-        if (clip == null) { playSignal(); return; }
-        pool.submit(() -> {
-            try {
-                clip.stop();
-                clip.setFramePosition(0);
-                clip.start();
-            } catch (Exception ignored) {}
-        });
-    }
 
     /** Tiếng động cơ — pitch tăng theo speed (0‥1 = tỉ lệ tốc độ). */
     public void playEngine(double speedRatio) {
         if (!canPlay("engine")) return;
         double baseFreq = 60 + speedRatio * 120;   // 60 Hz idle → 180 Hz full speed
         pool.submit(() -> {
+            // Lớp harmonic: fundamental + overtone
             byte[] buf = mix(
                 generateTone(baseFreq,      180, 0.35f, Wave.SAW),
                 generateTone(baseFreq * 2,  180, 0.15f, Wave.SINE)
@@ -111,6 +79,7 @@ public class SoundManager {
     public void playBarrierHit() {
         if (!canPlay("barrier")) return;
         pool.submit(() -> {
+            // Noise burst: nhiễu ngắn + thud
             byte[] thud   = generateTone(80,  80, 0.6f, Wave.SINE);
             byte[] noise  = generateNoise(40, 0.3f);
             playBuffer(concat(noise, thud));
@@ -202,6 +171,7 @@ public class SoundManager {
     //  Tổng hợp sóng âm
     // ─────────────────────────────────────────────────────────────────────
 
+    /** Tạo tone đơn (sine / square / saw / triangle). */
     private byte[] generateTone(double freq, int durationMs, float gain, Wave wave) {
         int n   = SAMPLE_RATE * durationMs / 1000;
         byte[] buf = new byte[n * 2];
@@ -221,6 +191,7 @@ public class SoundManager {
         return buf;
     }
 
+    /** Sweep tần số từ f1 → f2. */
     private byte[] generateSweep(double f1, double f2, int durationMs, float gain) {
         int n   = SAMPLE_RATE * durationMs / 1000;
         byte[] buf = new byte[n * 2];
@@ -237,6 +208,7 @@ public class SoundManager {
         return buf;
     }
 
+    /** Tạo nhiễu trắng (white noise). */
     private byte[] generateNoise(int durationMs, float gain) {
         int n   = SAMPLE_RATE * durationMs / 1000;
         byte[] buf = new byte[n * 2];
@@ -250,10 +222,12 @@ public class SoundManager {
         return buf;
     }
 
+    /** Silence (khoảng lặng) ms mili-giây. */
     private static byte[] silence(int ms) {
         return new byte[22050 * ms / 1000 * 2];
     }
 
+    /** Envelope: attack + release nhẹ tránh click. */
     private double envelope(int i, int total) {
         int atk = Math.min(total / 10, 220);
         int rel = Math.min(total / 10, 220);
@@ -262,6 +236,7 @@ public class SoundManager {
         return 1.0;
     }
 
+    /** Mix hai buffer cùng độ dài (average). */
     private static byte[] mix(byte[] a, byte[] b) {
         int len = Math.max(a.length, b.length);
         byte[] out = new byte[len];
@@ -275,6 +250,7 @@ public class SoundManager {
         return out;
     }
 
+    /** Nối hai buffer. */
     private static byte[] concat(byte[] a, byte[] b) {
         byte[] out = new byte[a.length + b.length];
         System.arraycopy(a, 0, out, 0, a.length);

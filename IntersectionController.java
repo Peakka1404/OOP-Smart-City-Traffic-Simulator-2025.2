@@ -1,37 +1,48 @@
 import java.util.*;
 
 /**
- * IntersectionController — Điều khiển đèn tại một ngã tư.
+ * IntersectionController v8 — Flexible intersection supporting any road direction.
  *
- * Pha xen kẽ: Nhóm A (đường song song) xanh ↔ Nhóm B (vuông góc) xanh.
- * Mỗi chuyển pha: đang xanh → vàng → đối diện xanh.
+ * NEW: getLaneNodes() returns 16 lane-center positions (green dots from diagrams):
+ *   For each approach road × 2 approach lanes + each departure road × 2 departure lanes.
  *
- * Mỗi con đường tiếp cận ngã tư có một TrafficLight riêng.
+ * Traffic light position: RIGHT side of road direction, at intersection boundary.
+ * Adjustable via TL_SIDE_OFFSET (px outside road barrier). Default = 18.
+ *   *** TL_SIDE_OFFSET is the parameter to change traffic light distance from road edge ***
  *
- * Yield logic:
- *   1. Nhường xe đã ở trong hộp ngã tư.
- *   2. Nếu cùng vào: nhường xe đến từ bên phải mình.
- *   3. Xe rẽ trái nhường xe đi thẳng/rẽ phải từ hướng đối diện.
+ * Phase grouping: auto-detects opposing road pairs, no hardcoded N/S/E/W assumption.
+ * Works for cardinal AND diagonal roads (45°/135°).
+ *
+ * Intersection type: regular (≥4 roads = traffic lights) or pass-through (< 4 = no lights).
  */
 public class IntersectionController {
 
-    // ── Node ngã tư ───────────────────────────────────────────────────────
-    private final Node node;
-    private final double halfWidth;   // kích thước hộp ngã tư (px)
+    // ── ADJUSTABLE PARAMETER ────────────────────────────────────────────
+    /**
+     * Distance (px) from road barrier to traffic light housing.
+     * Increase for lights further from road, decrease to move closer.
+     * Typical range: 8 to 30.
+     * *** This is the parameter the user asked to be notified about ***
+     */
+    public static double TL_SIDE_OFFSET = 18.0;
 
-    // ── Các đường tiếp cận → đèn tương ứng ───────────────────────────────
-    private final Map<Road, TrafficLight> lights = new LinkedHashMap<>();
+    // ── Lane fraction constants (match Vehicle.java) ──────────────────────
+    public static final double NORMAL_LANE_FRAC = 0.68;  // right/slow lane
+    public static final double PASS_LANE_FRAC   = 0.18;  // left/fast lane
 
-    // ── Hai nhóm đường: song song / vuông góc ────────────────────────────
-    private final List<Road> groupA = new ArrayList<>();  // pha A → xanh trước
-    private final List<Road> groupB = new ArrayList<>();  // pha B → xanh sau
+    // ── Core state ───────────────────────────────────────────────────────
+    private final Node   node;
+    private final double halfWidth;
 
-    // ── Trạng thái pha ────────────────────────────────────────────────────
+    private final Map<Road, TrafficLight> lights     = new LinkedHashMap<>();
+    private final List<Road>             groupA      = new ArrayList<>();
+    private final List<Road>             groupB      = new ArrayList<>();
+    private final boolean                hasLights;  // false for < 4 approach roads
+
     private enum Phase { A_GREEN, A_YELLOW, B_GREEN, B_YELLOW }
-    private Phase phase = Phase.A_GREEN;
+    private Phase  phase = Phase.A_GREEN;
     private double phaseTimer;
 
-    // Timing toàn bộ đèn (giây) — có thể chỉnh từ UI
     private double greenTime  = 8.0;
     private double yellowTime = 2.5;
 
@@ -41,49 +52,128 @@ public class IntersectionController {
         this.node      = node;
         this.halfWidth = halfWidth;
         this.phaseTimer = greenTime;
+        this.hasLights  = false; // set after registerApproachRoad + initPhases
     }
 
-    /**
-     * Đăng ký một đường tiếp cận vào ngã tư này.
-     * Gọi cho MỌI con đường có to == node (tức là các xe đi vào từ đường đó).
-     */
+    // ─────────────────────────────────────────────────────────────────────
+    //  Registration
+    // ─────────────────────────────────────────────────────────────────────
+
     public void registerApproachRoad(Road road) {
         if (lights.containsKey(road)) return;
 
-        // Vị trí đèn: ngay cạnh stop-line, bên trái của chiều đi
-        double[] stopPos = stopLinePos(road);
-        double lx = stopPos[0] - road.getPerpX() * (halfWidth + 10);
-        double ly = stopPos[1] - road.getPerpY() * (halfWidth + 10);
-        TrafficLight tl = new TrafficLight(road.getId(), lx, ly);
+        // Traffic light: RIGHT side of road direction, outside barrier
+        // s = + (halfWidth + TL_SIDE_OFFSET) → right side, outside
+        double stopT = Math.max(0, road.getLength() - halfWidth);
+        double[] pos = road.localToWorld(stopT, road.getHalfWidth() + TL_SIDE_OFFSET);
+        TrafficLight tl = new TrafficLight(road.getId(), pos[0], pos[1]);
         lights.put(road, tl);
-
-        // Phân vào nhóm: dùng dot product để tìm "đường song song"
-        if (groupA.isEmpty()) {
-            groupA.add(road);
-        } else {
-            Road ref = groupA.get(0);
-            double dot = Math.abs(ref.getDirX() * road.getDirX() + ref.getDirY() * road.getDirY());
-            if (dot > 0.5) groupA.add(road);   // song song (dot ≈ 1)
-            else           groupB.add(road);   // vuông góc (dot ≈ 0)
-        }
     }
 
-    /** Đồng bộ timing của tất cả đèn và bắt đầu pha A xanh. */
+    /**
+     * Assigns approach roads to two alternating phases.
+     * Uses angle-based pairing: find each road's best opposing partner (≈180° apart).
+     * Works for any road direction, including 45°/135° diagonals.
+     */
     public void initPhases() {
+        groupA.clear(); groupB.clear();
+
+        List<Road> remaining = new ArrayList<>(lights.keySet());
+        if (remaining.isEmpty()) return;
+
+        // Pair each road with its most-opposing partner (closest to 180° apart)
+        List<Road> paired = new ArrayList<>();
+        for (Road r : remaining) {
+            if (paired.contains(r)) continue;
+            double ax = r.getDirX(), ay = r.getDirY();
+            Road bestOpponent = null;
+            double bestDot = Double.MAX_VALUE;
+            for (Road s : remaining) {
+                if (s == r || paired.contains(s)) continue;
+                double dot = ax*s.getDirX() + ay*s.getDirY();
+                // Most-opposing = most negative dot (approaching -1)
+                if (dot < bestDot) { bestDot = dot; bestOpponent = s; }
+            }
+            if (bestOpponent != null && bestDot < -0.3) {
+                groupA.add(r); groupA.add(bestOpponent);
+                paired.add(r); paired.add(bestOpponent);
+            }
+        }
+        // Unpaired roads go to groupB (perpendicular)
+        for (Road r : remaining) {
+            if (!grouped(r)) groupB.add(r);
+        }
+        // If groupB is empty (all paired into A), split A evenly
+        if (groupB.isEmpty() && groupA.size() >= 2) {
+            int half = groupA.size() / 2;
+            groupB.addAll(groupA.subList(half, groupA.size()));
+            groupA.subList(half, groupA.size()).clear();
+        }
+
+        // Apply timing
         for (TrafficLight tl : lights.values()) {
-            tl.setGreenTime(greenTime);
-            tl.setYellowTime(yellowTime);
-            double redT = greenTime + yellowTime;
-            tl.setRedTime(redT);
+            tl.setGreenTime(greenTime); tl.setYellowTime(yellowTime);
+            tl.setRedTime(greenTime + yellowTime);
         }
-        // Khởi đầu: nhóm A xanh, nhóm B đỏ
+
+        // Check if intersection has enough roads for traffic lights
+        // (hasLights set separately; for < 4 roads just default green)
+        if (lights.size() < 4) {
+            for (TrafficLight tl : lights.values()) tl.forceGreen();
+            return;
+        }
+
         for (Road r : groupA) lights.get(r).forceGreen();
-        for (Road r : groupB) {
-            TrafficLight tl = lights.get(r);
-            if (tl != null) tl.forceRed();
-        }
+        for (Road r : groupB) { TrafficLight tl = lights.get(r); if (tl!=null) tl.forceRed(); }
         phaseTimer = greenTime;
         phase = Phase.A_GREEN;
+    }
+
+    private boolean grouped(Road r) { return groupA.contains(r) || groupB.contains(r); }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  16 Lane-Center Nodes (the green dots in the diagrams)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns the 16 lane-center positions at the intersection boundary.
+     *
+     * Layout (per road arm, at the stop-line edge):
+     *   Approach (coming in):
+     *     - Right lane center: localToWorld(length - icHW, hw * NORMAL_LANE_FRAC)
+     *     - Left  lane center: localToWorld(length - icHW, hw * PASS_LANE_FRAC)
+     *   Departure (going out, for the opposing direction road):
+     *     - Right lane center: localToWorld(icHW, hw * NORMAL_LANE_FRAC)
+     *     - Left  lane center: localToWorld(icHW, hw * PASS_LANE_FRAC)
+     *
+     * For a 4-way intersection: 4 arms × 4 nodes = 16 total.
+     * Each double[] is {x, y, isApproach (1=approach, 0=departure)}.
+     */
+    public List<double[]> getLaneNodes() {
+        List<double[]> result = new ArrayList<>();
+        double icHW = halfWidth;
+
+        // Approach nodes (roads coming INTO intersection, registered in lights map)
+        for (Road r : lights.keySet()) {
+            double hw = r.getHalfWidth();
+            double t  = Math.max(0, r.getLength() - icHW);
+            double[] rn = r.localToWorld(t, hw * NORMAL_LANE_FRAC); // right lane
+            double[] ln = r.localToWorld(t, hw * PASS_LANE_FRAC);   // left lane
+            result.add(new double[]{rn[0], rn[1], 1});
+            result.add(new double[]{ln[0], ln[1], 1});
+        }
+
+        // Departure nodes (roads going OUT from intersection)
+        for (Road r : node.getOutgoingRoads()) {
+            double hw = r.getHalfWidth();
+            double t  = Math.min(r.getLength(), icHW);
+            double[] rn = r.localToWorld(t, hw * NORMAL_LANE_FRAC); // right lane
+            double[] ln = r.localToWorld(t, hw * PASS_LANE_FRAC);   // left lane
+            result.add(new double[]{rn[0], rn[1], 0});
+            result.add(new double[]{ln[0], ln[1], 0});
+        }
+
+        return result;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -91,45 +181,24 @@ public class IntersectionController {
     // ─────────────────────────────────────────────────────────────────────
 
     public void update(double dt) {
-        phaseTimer -= dt;
         for (TrafficLight tl : lights.values()) tl.update(dt);
+        if (lights.size() < 4) return;  // no phase cycling for small intersections
 
+        phaseTimer -= dt;
         if (phaseTimer > 0) return;
 
-        // Chuyển pha
         switch (phase) {
-            case A_GREEN -> {
-                // A → vàng
-                for (Road r : groupA) { TrafficLight t = lights.get(r); if(t!=null) t.forceYellow(); }
-                phaseTimer = yellowTime;
-                phase = Phase.A_YELLOW;
-            }
-            case A_YELLOW -> {
-                // B → xanh, A → đỏ
-                for (Road r : groupA) { TrafficLight t = lights.get(r); if(t!=null) t.forceRed(); }
-                for (Road r : groupB) { TrafficLight t = lights.get(r); if(t!=null) t.forceGreen(); }
-                phaseTimer = greenTime;
-                phase = Phase.B_GREEN;
-            }
-            case B_GREEN -> {
-                for (Road r : groupB) { TrafficLight t = lights.get(r); if(t!=null) t.forceYellow(); }
-                phaseTimer = yellowTime;
-                phase = Phase.B_YELLOW;
-            }
-            case B_YELLOW -> {
-                for (Road r : groupB) { TrafficLight t = lights.get(r); if(t!=null) t.forceRed(); }
-                for (Road r : groupA) { TrafficLight t = lights.get(r); if(t!=null) t.forceGreen(); }
-                phaseTimer = greenTime;
-                phase = Phase.A_GREEN;
-            }
+            case A_GREEN  -> { for (Road r:groupA){TrafficLight t=lights.get(r);if(t!=null)t.forceYellow();} phaseTimer=yellowTime; phase=Phase.A_YELLOW; }
+            case A_YELLOW -> { for (Road r:groupA){TrafficLight t=lights.get(r);if(t!=null)t.forceRed();} for(Road r:groupB){TrafficLight t=lights.get(r);if(t!=null)t.forceGreen();} phaseTimer=greenTime; phase=Phase.B_GREEN; }
+            case B_GREEN  -> { for (Road r:groupB){TrafficLight t=lights.get(r);if(t!=null)t.forceYellow();} phaseTimer=yellowTime; phase=Phase.B_YELLOW; }
+            case B_YELLOW -> { for (Road r:groupB){TrafficLight t=lights.get(r);if(t!=null)t.forceRed();} for(Road r:groupA){TrafficLight t=lights.get(r);if(t!=null)t.forceGreen();} phaseTimer=greenTime; phase=Phase.A_GREEN; }
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Query
+    //  Queries
     // ─────────────────────────────────────────────────────────────────────
 
-    /** Lấy trạng thái đèn cho đường tiếp cận `road`. */
     public TrafficLight.LightState getLightState(Road road) {
         TrafficLight tl = lights.get(road);
         return tl == null ? TrafficLight.LightState.GREEN : tl.getState();
@@ -137,108 +206,46 @@ public class IntersectionController {
 
     public TrafficLight getLight(Road road) { return lights.get(road); }
 
-    /**
-     * Vị trí stop-line (điểm dừng) cho đường `road` trước khi vào ngã tư.
-     * = điểm trên đường, cách node halfWidth px.
-     */
     public double[] stopLinePos(Road road) {
-        // t = length - halfWidth: cách node halfWidth theo chiều road
-        double t = road.getLength() - halfWidth;
-        t = Math.max(0, t);
-        return road.localToWorld(t, 0);   // center của stop-line
+        double t = Math.max(0, road.getLength() - halfWidth);
+        return road.localToWorld(t, 0);
     }
 
-    /**
-     * Khoảng cách từ xe tới stop-line theo dọc đường.
-     * Dương = còn phía trước stop-line; âm = đã qua.
-     */
     public double distToStopLine(Vehicle v, Road road) {
         double[] loc = road.worldToLocal(v.getX(), v.getY());
-        double t = loc[0];
-        double stopT = road.getLength() - halfWidth;
-        return stopT - t;
+        return (road.getLength() - halfWidth) - loc[0];
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Yield Logic
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * Xe `me` có phải nhường đường không?
-     *
-     * Quy tắc (theo thứ tự ưu tiên):
-     *  1. Nhường xe đang ở trong hộp ngã tư (đã vào trước).
-     *  2. Nếu xe đối diện đi thẳng/rẽ phải mà mình rẽ trái → nhường.
-     *  3. Nếu hai xe cùng lúc vào và đường đi xung đột → nhường xe từ bên phải.
-     *
-     * @return true = phải nhường (giảm/dừng)
-     */
     public boolean shouldYield(Vehicle me, Road myRoad, List<Vehicle> others) {
-        double cx = node.getX(), cy = node.getY();
-        double boxR = halfWidth * 1.3;   // bán kính hộp ngã tư
-
+        double cx=node.getX(), cy=node.getY(), boxR=halfWidth*1.3;
         for (Vehicle other : others) {
-            if (other == me || other.isArrived()) continue;
-
-            double odx = other.getX() - cx, ody = other.getY() - cy;
-            double odist = Math.sqrt(odx*odx + ody*ody);
-            boolean otherInBox = odist < boxR;
-
-            // Quy tắc 1: xe khác đã trong hộp → nhường
-            if (otherInBox) {
-                // Chỉ nhường nếu chúng có đường xung đột
-                if (pathsConflict(me, other)) return true;
-            }
-
-            // Quy tắc 2 & 3: cả hai đang tiếp cận (chưa vào hộp)
-            double mdx = me.getX() - cx, mdy = me.getY() - cy;
-            double mdist = Math.sqrt(mdx*mdx + mdy*mdy);
-            if (mdist > boxR * 2 || odist > boxR * 2) continue;
-
-            if (!pathsConflict(me, other)) continue;
-
-            // Xe other đến từ bên phải của me?
-            double mcos = Math.cos(me.getAngle()), msin = Math.sin(me.getAngle());
-            double cross = mcos * ody - msin * odx;
-            // cross > 0 = other bên phải (screen coords y-down) → nhường
-            if (cross > 0) return true;
+            if (other==me||other.isArrived()) continue;
+            double odx=other.getX()-cx, ody=other.getY()-cy;
+            double odist=Math.sqrt(odx*odx+ody*ody);
+            if (odist<boxR && pathsConflict(me,other)) return true;
+            double mdist=Math.sqrt((me.getX()-cx)*(me.getX()-cx)+(me.getY()-cy)*(me.getY()-cy));
+            if (mdist>boxR*2||odist>boxR*2) continue;
+            if (!pathsConflict(me,other)) continue;
+            double mcos=Math.cos(me.getAngle()), msin=Math.sin(me.getAngle());
+            if (mcos*ody - msin*odx > 0) return true;
         }
         return false;
     }
 
-    /**
-     * Hai xe có đường đi xung đột trong ngã tư không?
-     * Đơn giản hoá: xung đột nếu góc giữa hai hướng đi < 150° (không cùng chiều).
-     */
     private boolean pathsConflict(Vehicle a, Vehicle b) {
-        double dot = Math.cos(a.getAngle()) * Math.cos(b.getAngle())
-                   + Math.sin(a.getAngle()) * Math.sin(b.getAngle());
-        return dot < 0.5;   // góc > 60° = có thể xung đột
+        double dot=Math.cos(a.getAngle())*Math.cos(b.getAngle())+Math.sin(a.getAngle())*Math.sin(b.getAngle());
+        return dot < 0.5;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Timing setters (từ ControlPanel)
-    // ─────────────────────────────────────────────────────────────────────
+    // Timing
+    public void setGreenTime(double t)  { greenTime=Math.max(2,t); for(TrafficLight tl:lights.values()) tl.setGreenTime(greenTime); }
+    public void setYellowTime(double t) { yellowTime=Math.max(0.5,t); for(TrafficLight tl:lights.values()) tl.setYellowTime(yellowTime); }
+    public double getGreenTime()        { return greenTime; }
+    public double getYellowTime()       { return yellowTime; }
 
-    public void setGreenTime(double t) {
-        greenTime = Math.max(2, t);
-        for (TrafficLight tl : lights.values()) tl.setGreenTime(greenTime);
-    }
-
-    public void setYellowTime(double t) {
-        yellowTime = Math.max(0.5, t);
-        for (TrafficLight tl : lights.values()) tl.setYellowTime(yellowTime);
-    }
-
-    public double getGreenTime()  { return greenTime; }
-    public double getYellowTime() { return yellowTime; }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Getters
-    // ─────────────────────────────────────────────────────────────────────
-
-    public Node                    getNode()   { return node; }
-    public double                  getHalfWidth(){ return halfWidth; }
-    public Map<Road, TrafficLight> getLights() { return Collections.unmodifiableMap(lights); }
-    public Collection<TrafficLight> getAllLights(){ return lights.values(); }
+    public Node                     getNode()      { return node; }
+    public double                   getHalfWidth() { return halfWidth; }
+    public Map<Road,TrafficLight>   getLights()    { return Collections.unmodifiableMap(lights); }
+    public Collection<TrafficLight> getAllLights()  { return lights.values(); }
+    public int getRoadCount()                      { return lights.size(); }
 }

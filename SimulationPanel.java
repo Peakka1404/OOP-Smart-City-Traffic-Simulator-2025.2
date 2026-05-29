@@ -1,9 +1,9 @@
+import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.util.*;
-import javax.swing.*;
 
 /**
  * SimulationPanel — Canvas chính.
@@ -111,10 +111,7 @@ public class SimulationPanel extends JPanel {
             if (spawnAccum >= spawnInterval) {
                 spawnAccum = 0;
                 Vehicle v = network.spawnVehicle();
-                if (v != null) {
-                    totalSpawned++;
-                    sound.playVehicleSound(v.getType());
-                }   
+                if (v != null) totalSpawned++;
             }
         }
         repaint();
@@ -337,13 +334,10 @@ public class SimulationPanel extends JPanel {
             java.util.List<Node> path = network.findPath(startNode, dest);
             if (path != null && path.size() >= 2) {
                 String id = String.format("V%03d", (int)(Math.random()*999));
-                // Mới:
-String[] types = {"Car", "Ambulance", "Bicycle", "FireTruck", "Motorbike"};
-String type = types[new Random().nextInt(types.length)];
-Vehicle v = new Vehicle(id, type, startNode.getX(), startNode.getY(),
-        network.getDefaultVehicleWidth(), network.getDefaultVehicleHeight(),
-        network.getDefaultMaxSpeed(), path);
-                network.addVehicle(v); totalSpawned++; sound.playVehicleSound(type); return;
+                Vehicle v = new Vehicle(id, startNode.getX(), startNode.getY(),
+                        network.getDefaultVehicleWidth(), network.getDefaultVehicleHeight(),
+                        network.getDefaultMaxSpeed(), path);
+                network.addVehicle(v); totalSpawned++; sound.playSignal(); return;
             }
         }
     }

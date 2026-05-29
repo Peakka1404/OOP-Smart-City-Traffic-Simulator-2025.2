@@ -1,6 +1,6 @@
+import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import javax.swing.*;
 
 /**
  * Main — Điểm khởi động. Hiện dialog chọn chế độ.

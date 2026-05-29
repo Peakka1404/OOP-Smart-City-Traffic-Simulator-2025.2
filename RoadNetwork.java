@@ -188,9 +188,7 @@ public class RoadNetwork {
 
             double[] pt = szA.randomSpawnPoint(random);
             String id = String.format("V%03d", vehicleCounter++);
-            String[] types = {"Car", "Ambulance", "Bicycle", "FireTruck", "Motorbike"};
-            String type = types[random.nextInt(types.length)];
-            Vehicle v = new Vehicle(id, type, pt[0], pt[1], w, h, maxSpd, path);
+            Vehicle v = new Vehicle(id, pt[0], pt[1], w, h, maxSpd, path);
             vehicles.add(v);
             return v;
         }
@@ -291,18 +289,28 @@ public class RoadNetwork {
      *
      * @return node đầu xa mới, hoặc null nếu hướng đã bị chiếm / trùng node
      */
+    /** Overload with custom length for diagonal roads (45°/135°). */
+    public Node extendFromTerminal(Node terminal, double angle, double length) {
+        double saved = editorCellLength; editorCellLength = length;
+        Node r = extendFromTerminal(terminal, angle); editorCellLength = saved; return r;
+    }
+
     public Node extendFromTerminal(Node terminal, double angle) {
         double len = editorCellLength;
         double newX = terminal.getX() + Math.cos(angle) * len;
         double newY = terminal.getY() + Math.sin(angle) * len;
 
-        // Kiểm tra node trùng
-        for (Node n : nodes) if (n.distanceTo(newX, newY) < 30) return null;
+        // FIX: connect to existing node if target position is near one (facing roads)
+        for (Node existing : nodes) {
+            if (existing != terminal && existing.distanceTo(newX, newY) < 55) {
+                return connectTerminals(terminal, existing);
+            }
+        }
 
-        // Kiểm tra hướng đã bị chiếm
+        // Check direction not already occupied
         if (isDirectionOccupied(terminal, angle)) return null;
 
-        // Tạo node mới
+        // Create new node
         String newId = "T" + nodes.size();
         Node newNode = new Node(newId, newX, newY);
         addNode(newNode);
@@ -340,7 +348,7 @@ public class RoadNetwork {
 
         // Hướng "tiếp tục" = ngược chiều đường nối vào (đi xa mạng lưới)
         double cDirX = outgoing.getDirX(), cDirY = outgoing.getDirY();
-        double continueAngle = Math.atan2(cDirY, cDirX);   // đi xa mạng
+        double continueAngle = Math.atan2(-cDirY, -cDirX); // FIXED: opposite = away from network
 
         // Vuông góc
         double perpCW  = continueAngle + Math.PI / 2;   // phải
@@ -390,6 +398,63 @@ public class RoadNetwork {
         } else {
             addIntersection(node, editorHalfWidth);
         }
+    }
+
+
+    /**
+     * Kết nối hai terminal nodes bằng một con đường 2 chiều mới.
+     * Dùng khi người dùng muốn nối 2 đoạn đường đang chỉ vào nhau (facing roads).
+     */
+    public Node connectTerminals(Node a, Node b) {
+        // Check not already connected
+        for (Road r : roads) if ((r.getFrom()==a&&r.getTo()==b)||(r.getFrom()==b&&r.getTo()==a)) return b;
+        double laneWidth = editorHalfWidth * 2.0 / editorLaneCount;
+        String fwd = "RC_" + a.getId() + "_" + b.getId();
+        String bwd = "RC_" + b.getId() + "_" + a.getId();
+        addBidirectionalRoad(fwd, bwd, a, b, laneWidth, editorLaneCount);
+        removeSpawnZone(a); removeSpawnZone(b);
+        upgradeToIntersection(a); upgradeToIntersection(b);
+        return b;
+    }
+
+    /**
+     * Đặt ngã tư linh hoạt (flex intersection) tại vị trí (cx,cy).
+     * Tự động kết nối tất cả SpawnZone terminals trong vòng snapDist.
+     * Không yêu cầu hướng cụ thể — hoạt động với bất kỳ góc đường nào.
+     * @return số nhánh kết nối thành công
+     */
+    public int placeFlexIntersection(double cx, double cy, double snapDist) {
+        List<Node> near = new ArrayList<>();
+        for (SpawnZone sz : spawnZones) {
+            if (sz.getNode().distanceTo(cx, cy) < snapDist) near.add(sz.getNode());
+        }
+        if (near.size() < 2) return 0;
+
+        // Use centroid as junction center (or nearest existing node)
+        double avgX = near.stream().mapToDouble(Node::getX).average().orElse(cx);
+        double avgY = near.stream().mapToDouble(Node::getY).average().orElse(cy);
+
+        // Check if a suitable existing node is already near centroid
+        Node hub = null;
+        for (Node n : nodes) {
+            if (n.distanceTo(avgX, avgY) < snapDist * 0.5 && !near.contains(n)) { hub = n; break; }
+        }
+        if (hub == null) {
+            hub = new Node("FJ" + nodes.size(), avgX, avgY);
+            addNode(hub);
+        }
+
+        double laneWidth = editorHalfWidth * 2.0 / editorLaneCount;
+        int connected = 0;
+        for (Node terminal : near) {
+            String fwd = "FJ_" + hub.getId() + "_" + terminal.getId();
+            String bwd = "FJ_" + terminal.getId() + "_" + hub.getId();
+            addBidirectionalRoad(fwd, bwd, hub, terminal, laneWidth, editorLaneCount);
+            removeSpawnZone(terminal);
+            connected++;
+        }
+        upgradeToIntersection(hub);
+        return connected;
     }
 
     /** Kiểm tra xem đã có đường đi theo angle từ node này chưa. */

@@ -1,2 +1,2 @@
 #!/bin/bash
-java -jar yourfilename.jar
+java -jar TrafficSim.jar
